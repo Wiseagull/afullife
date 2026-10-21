@@ -8,7 +8,7 @@
 
 ## 名字
 
-AFULLIFE，a full life。不是缩写游戏，是一句许愿：**我要给她完整的一生。**
+AFULLIFE，a full life。不是缩写游戏，是一句许愿：**give your QQbot a full life —— 我要给她完整的一生。**
 
 ## 它想解决什么
 
