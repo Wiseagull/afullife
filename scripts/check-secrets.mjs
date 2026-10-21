@@ -16,6 +16,10 @@ const SKIP_DIRS = new Set([
 const SKIP_FILES = new Set(['config.local.json', 'package-lock.json', 'pnpm-lock.yaml']);
 const SKIP_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.zip', '.exe', '.log', '.pid']);
 
+// 自检用的假图（PNG/JPEG 的 base64 开头）会被"长令牌"规则误判成密钥——
+// 它们本来就是测试夹具，不是秘密。这里显式放行。
+const BASE64_IMAGE = /^(iVBORw0KGgo|ffd8ffe|R0lGODlh|UklGR)/;
+
 /** 看着像密钥/令牌的东西 */
 const PATTERNS = [
   { name: 'DeepSeek key', re: /\bsk-[A-Za-z0-9]{20,}/g },
@@ -63,8 +67,9 @@ for (const file of files) {
 
   for (const p of PATTERNS) {
     for (const m of text.matchAll(p.re)) {
-      // 测试用例里的假串放过
+      // 测试用例里的假串放过；自检夹具里的 base64 假图也放过
       if (/FAKE|example|dummy|xxxx/i.test(m[0])) continue;
+      if (BASE64_IMAGE.test(m[0])) continue;
       hits.push({ file: rel, kind: p.name, sample: m[0].slice(0, 12) + '…' });
     }
   }

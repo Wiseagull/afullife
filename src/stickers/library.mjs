@@ -15,6 +15,26 @@ const EXT_OK = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 
 const toRel = (root, p) => path.relative(root, p).split(path.sep).join('/');
 
+/**
+ * 看文件头猜真身。QQ 下来的图统统叫 `.png`，里头可能是 jpg 也可能是 gif；
+ * 按名字存下去，后面按图片格式读它的人（比如我自己看图）会被扩展名骗到，
+ * 直接报「声明是 png，内容不是」。所以存的时候按真身取名。
+ * 猜不出就返回 null，让调用方退回按扩展名走。
+ */
+const sniffExt = (file) => {
+  let b;
+  try {
+    b = Buffer.alloc(12);
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, b, 0, 12, 0); } finally { fs.closeSync(fd); }
+  } catch { return null; }
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return '.png';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return '.jpg';
+  if (b.slice(0, 4).toString('latin1') === 'GIF8') return '.gif';
+  if (b.slice(0, 4).toString('latin1') === 'RIFF' && b.slice(8, 12).toString('latin1') === 'WEBP') return '.webp';
+  return null;
+};
+
 export class StickerLibrary {
   #file;
   #dir;
@@ -56,6 +76,9 @@ export class StickerLibrary {
   add({ src, tags = [], when = '', ctx = '', from = '', room = null, pending = false }) {
     const ext = path.extname(src).toLowerCase();
     if (!EXT_OK.has(ext)) throw new Error(`不是图片：${ext || '(没有扩展名)'}`);
+    // 存的时候按文件头取名，不按 QQ 给的假扩展名（见 sniffExt 的注释）
+    const sniffed = sniffExt(src);
+    const real = sniffed && EXT_OK.has(sniffed) ? sniffed : ext;
     const size = fs.statSync(src).size;
     const originName = path.basename(src);
 
@@ -70,7 +93,7 @@ export class StickerLibrary {
     } catch { /* 目录还没建就先不管，下面 copyFileSync 自己会报 */ }
     let id;
     do { id = `k${String(++this.#data.seq).padStart(4, '0')}`; } while (used.has(id));
-    const dest = path.join(this.#dir, `${id}${ext}`);
+    const dest = path.join(this.#dir, `${id}${real}`);
     fs.copyFileSync(src, dest);
 
     const item = {
@@ -122,6 +145,15 @@ export class StickerLibrary {
     } catch {
       try { fs.unlinkSync(src); } catch { /* 没了就算了 */ }
     }
+    // 墓碑：跟 drop()/prune() 一样。以前这里靠「文件已经挪走了、合并时 existsSync 是 false」
+    // 侥幸躲过复活；但 Windows 上文件被别的程序占着时 rename 和 unlink 都会失败，
+    // 图还在原处，下一次保存就把它原样并回来了（2026-10-22 跑 tmp/test-prune2.mjs 撞出来的）。
+    this.#data.tombstones.push({ id, at: new Date().toISOString() });
+    const keepFrom = Date.now() - 30 * 24 * 3600 * 1000;
+    this.#data.tombstones = this.#data.tombstones.filter((t) => {
+      const ts = Date.parse(t?.at || '');
+      return Number.isFinite(ts) ? ts >= keepFrom : true;
+    });
     const archive = path.join(this.#dir, '..', `reject-${new Date().toISOString().slice(0, 10)}.jsonl`);
     try {
       const line = JSON.stringify({ ...it, reason, rejectedAt: Date.now() });

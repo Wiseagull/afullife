@@ -3,6 +3,10 @@
 import { normalizeEvent } from '../src/body/room.mjs';
 import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
+import { StickerLibrary } from '../src/stickers/library.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 let pass = 0;
 const fails = [];
@@ -115,6 +119,56 @@ ok('每段不超长', parts.every((p) => p.length <= 1200));
 ok('切分不丢字', parts.join('').replace(/\s/g, '') === long.replace(/\s/g, ''));
 
 check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
+
+// ── 表情库 ──────────────────────────────────────────────
+// 用临时目录，绝不碰 data/stickers 里真那些图。
+{
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qd-selftest-lib-'));
+  const tmpDir = path.join(tmpRoot, 'library');
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const tmpFile = path.join(tmpRoot, 'library.json');
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const jpeg = Buffer.from(
+    'ffd8ffe000104a46494600010100000100010000ffdb004300ffc00011080001000103012200021101031101feffd9',
+    'hex',
+  );
+  const blurp = (name, buf) => { const p = path.join(tmpRoot, name); fs.writeFileSync(p, buf); return p; };
+
+  const lib = new StickerLibrary({ file: tmpFile, dir: tmpDir, root: tmpRoot });
+  // 1. QQ 下来的图都叫 .png，里头可能是 jpg —— 存的时候得按文件头取名
+  const a = lib.add({ src: blurp('fake.png', jpeg), tags: ['猫'] }).item;
+  check('按文件头取名', a.file.endsWith('.jpg'), true);
+  const b = lib.add({ src: blurp('real.png', png), tags: ['重复'] }).item;
+  const c = lib.add({ src: blurp('b.png', png), tags: ['可爱'] }).item;
+  const d = lib.add({ src: blurp('c.png', png), tags: ['呆'] }).item;
+
+  // 2. prune 删掉的不能从盘上复活（换实例再读、再存一次都不行）
+  const out = lib.prune({ maxCount: 2, maxMb: 200 }, () => {});
+  check('prune 先删标重复的', out.removed, 2);
+  const again = new StickerLibrary({ file: tmpFile, dir: tmpDir, root: tmpRoot });
+  again.markUsed(c.id);
+  const third = new StickerLibrary({ file: tmpFile, dir: tmpDir, root: tmpRoot });
+  check('删掉的不复活', third.stats().count, 2);
+  ok('删掉的图真从盘上没了', !fs.existsSync(path.resolve(tmpRoot, a.file)));
+  ok('留下的还在', [b, c, d].filter((x) => third.get(x.id)).length === 2);
+
+  // 3. reject 也要写墓碑：图被别的程序占着、挪不走也删不掉时，记录不能爬回来
+  const keep = third.all()[0];
+  const bad = third.add({ src: blurp('shot.png', png), tags: [] }).item;
+  const badAbs = path.resolve(third.abs(bad));
+  const realRename = fs.renameSync;
+  const realUnlink = fs.unlinkSync;
+  fs.renameSync = (x, y) => { if (path.resolve(x) === badAbs) throw new Error('EBUSY'); return realRename(x, y); };
+  fs.unlinkSync = (x) => { if (path.resolve(x) === badAbs) throw new Error('EPERM'); return realUnlink(x); };
+  try { third.reject(bad.id, '截图'); } finally { fs.renameSync = realRename; fs.unlinkSync = realUnlink; }
+  third.markUsed(keep.id);
+  ok('reject 掉的不复活', !new StickerLibrary({ file: tmpFile, dir: tmpDir, root: tmpRoot }).get(bad.id));
+
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
 
 // ── 结果 ────────────────────────────────────────────────
 if (fails.length) {

@@ -16,7 +16,8 @@
     "find:snowluma": "node scripts/find-snowluma.mjs",
     "install:panel": "node scripts/install-panel.mjs",
     "update": "node scripts/update.mjs",
-    "update:check": "node scripts/update.mjs --check"
+    "update:check": "node scripts/update.mjs --check",
+    "probe:rules": "node scripts/probe-rules.mjs"
   },
   "license": "GPL-3.0-or-later",
   "keywords": [

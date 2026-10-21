@@ -112,6 +112,18 @@ export const KNOW_HINT = [
   `（小本本 notebook/ 是你自己的：想记住的事随手写下 —— node scripts/notebook.mjs write "…"；看就 read --days=3，找就 find <词>，都在项目根 ${ROOT} 下跑。）`,
 ].join('\n');
 
+const BLANK = String.fromCharCode(10, 10);
+
+// 提示词最末尾的定调。
+// 为什么要有它：上面几十行全是"规则"（工具怎么用、命令怎么写、格式怎么分），
+// 模型读到最后会顺着那股"规程"的腔调说话——于是她一张嘴就像在交报告。
+// 最后三行写"声音"而不是"规矩"，把她拽回平时的样子。
+export const VOICE_ANCHOR = [
+  '（说话就用平时那样：句子有起伏，别切成一句一条的断言；该撒娇就撒娇，该急就急，该气就气。）',
+  '（你卡里写的称呼和自称——该怎么叫他、怎么叫自己——照那样来；那是自然冒出来的，不是口号。）',
+  '（你是在跟他聊天，不是在交报告：不要起承转合，不要"首先其次最后"，不要总结收尾。）',
+].join(String.fromCharCode(10));
+
 /** 面板「试一试」用：拿这份人设自然回一句，别把规则念出来 */
 export const SELF_INSTRUCTION = [
   '【现在是在试一句话】',
@@ -119,7 +131,7 @@ export const SELF_INSTRUCTION = [
   '- 他让你动手就动手，做不了就直说卡在哪一步，别装。',
 ].join('\n');
 
-export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '' }) {
+export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null }) {
   const lines = [];
 
   lines.push(`【房间】${roomKey}`);
@@ -154,7 +166,15 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
     lines.push(stickerLine);
     lines.push('');
   }
-  lines.push(extra || ruleOf(isGroup));
+  // 规程由调用方决定挂哪一档（闲聊精简 / 派活全套）；不传就按场合给默认全套。
+  // 注意：extra（比如"也许你想记下来的"草稿）是附加内容，不能顶替规程。
+  lines.push(rules === null ? ruleOf(isGroup) : rules);
+  if (extra) {
+    lines.push('');
+    lines.push(extra);
+  }
+  lines.push('');
+  lines.push(VOICE_ANCHOR);
 
   return lines.join('\n');
 }
@@ -163,7 +183,7 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
  * 接着上次说时用：只把这次要回的话递过去（外加一小段别处的动静）。
  * 本房间的上下文由会话自己记着。
  */
-export function buildFollowup(messages, { delta = '', isGroup = false, addressed = false, selfNames = [], stickerLine = '', personaNote = '' } = {}) {
+export function buildFollowup(messages, { delta = '', isGroup = false, addressed = false, selfNames = [], stickerLine = '', personaNote = '', rules = '' } = {}) {
   // 人格每一轮都要带：会话是接着聊的，但提示词每轮新拼，不放进去她就只剩记忆和对白
   const person = personaNote ? personaNote + String.fromCharCode(10, 10) : '';
   const head = delta ? `${delta}\n\n${KNOW_HINT}\n\n` : '';
@@ -171,13 +191,15 @@ export function buildFollowup(messages, { delta = '', isGroup = false, addressed
     ? buildTriggerLines(messages, { selfNames }).join('\n')
     : renderTranscript(messages);
   const tail = stickerLine ? `\n\n${stickerLine}` : '';
-  if (!isGroup) return person + head + body + tail;
+  // 接话时默认不挂规程（闲聊最多）；要动手时调用方把全套传进来
+  const ruleBlock = rules ? BLANK + rules : '';
+  if (!isGroup) return person + head + body + tail + ruleBlock + BLANK + VOICE_ANCHOR;
 
   // 群聊：点名了就直说；没点名就提醒一句"不想接可以 PASS"（一句话，不重复整段规则）
   const hint = addressed
     ? '（群里，这句点了你的名，正常接。）'
     : '（群里，没点你名。想接就接，接不上只回 PASS。）';
-  return `${person}${head}${body}\n\n${hint}${tail}`;
+  return `${person}${head}${body}\n\n${hint}${tail}${ruleBlock}${BLANK}${VOICE_ANCHOR}`;
 }
 
 /**

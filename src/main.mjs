@@ -13,7 +13,8 @@ import { SelfDrafts } from './memory/selfdrafts.mjs';
 import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mjs';
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
 import { renderForwardNodes, pickNodes } from './body/forward.mjs';
-import { buildPrompt, buildFollowup, NOPOWER_HINT, renderStickers, setHints } from './body/prompt.mjs';
+import { buildPrompt, buildFollowup, NOPOWER_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
+import { judgeFull, chatRules } from './body/rules.mjs';
 import { setWorkspaceRoots } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
@@ -216,6 +217,9 @@ const worker = cfg.brain?.kind === 'headless'
   : null;
 
 let lastSeenTs = Date.now();
+// 每个房间「上一轮动过手没有」。只认上一轮——用 20 分钟窗口会让一次 web_fetch
+// 把后面半小时全判成干活，闲聊就永远回到精简体。
+const lastRoundTouched = new Map();
 const REMEMBER_RE = /(记住|记一下|记下|别忘了|remember)/i;
 const debounce = new Debounce(cfg.debounceMs, (roomKey, msgs) => {
   queue.push(() => handleBatch(roomKey, msgs), roomKey);
@@ -639,10 +643,28 @@ async function handleBatch(roomKey, msgs) {
   }
   lastSelfMtime = selfMtime;
 
+  // 上一轮她动过手吗？取完就把这一轮清零，等这一轮真动手再置位
+  const touchedPrevRound = lastRoundTouched.get(roomKey) === true;
+  lastRoundTouched.set(roomKey, false);
+
   const draftsLine = selfDrafts.render(3);
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor(isGroup), extra: draftsLine });
+  // 规程按需挂：闲聊只留四句，像要派活才挂全套。
+  // 判错不要紧——规程不是权限，工具每轮都在，没挂说明她也照样能调。
+  const verdict = judgeFull({
+    isGroup,
+    messages: msgs,
+    addressed,
+    toolsJustUsed: touchedPrevRound,
+  });
+  const rulesText = verdict.full ? ruleOf(isGroup) : chatRules(isGroup);
+  L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor(isGroup), extra: draftsLine, rules: rulesText });
   let prompt = sid
-    ? buildFollowup(msgs, { delta, isGroup, addressed, selfNames: names, stickerLine , personaNote: personaNoteFor(isGroup) })
+    ? buildFollowup(msgs, {
+      delta, isGroup, addressed, selfNames: names, stickerLine,
+      personaNote: personaNoteFor(isGroup),
+      rules: verdict.full ? rulesText : '',
+    })
     : promptFresh;
 
   const fromOwnerEarly = isRoot(last.from);
@@ -676,10 +698,14 @@ async function handleBatch(roomKey, msgs) {
   // 她一动手就不再垫话：这条消息会在你电脑上弹一下 QQ，
   // 而 SendInput 打字是打给“当前前台窗口”的，弹窗一抢前台，字就打空了。
   const onEventAcked = (ev) => {
-    if (ev?.type === 'tool_call' && ackTimer) {
-      clearTimeout(ackTimer);
-      ackTimer = null;
-      L('ack', '她动手了，这句不垫');
+    if (ev?.type === 'tool_call') {
+      // 记一笔：这个房间在动手。下一轮就算他没明说，也知道还在同一条线上。
+      lastRoundTouched.set(roomKey, true);
+      if (ackTimer) {
+        clearTimeout(ackTimer);
+        ackTimer = null;
+        L('ack', '她动手了，这句不垫');
+      }
     }
     return onEvent(ev);
   };
