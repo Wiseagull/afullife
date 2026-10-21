@@ -1,0 +1,36 @@
+# 依赖与运行数据（绝不进仓库）
+node_modules/
+/data/
+/backups/
+config.local.json
+*.log
+*.pid
+.DS_Store
+
+# 用户把 SnowLuma 放这儿时，别把第三方的几十 MB 一起提交
+/vendor/
+
+# 临时目录：只保留占位文件。
+# 必须写成 /tmp/* 而不是 /tmp/ —— git 不会把"被排除目录"里的文件再拉回来，
+# 用 /tmp/ 的话下面那条 !/tmp/.gitkeep 是无效的。
+/tmp/*
+!/tmp/.gitkeep
+
+# 小本本是她自己的私房话，只把空架子和说明放进仓库
+notebook/notes/*
+notebook/memories/*
+notebook/archive/*
+notebook/tmp/*
+!notebook/*/.gitkeep
+
+# 产物：她画的图、别人发的表情原图
+/SD-Picture/
+/stickers/
+
+# SD 画图插件自己写进工作区的脚本，不是本项目的东西
+sd-direct.ps1
+sd-inject.ps1
+sd-auto-mask.py
+
+# 人设（persona/*.md）故意不挡：仓库里带一份能直接用的默认人设，
+# self.md 是空的，留给她自己写。

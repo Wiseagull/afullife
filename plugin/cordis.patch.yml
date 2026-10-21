@@ -1,0 +1,8 @@
+# afullife-panel —— 把 AFL 通道的设置页挂进 DSH。
+#
+# `name` 必须和 package.json 里的包名一致，DSH 靠它去树里找这个包。
+# `id` 是 loader entry id，同一 profile 里唯一即可。
+
+- insert:
+    - id: afullife-panel
+      name: afullife-panel

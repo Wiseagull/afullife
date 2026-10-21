@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安装问题先看文档
+    url: https://github.com/Wiseagull/afullife/blob/main/docs/install.md
+    about: 装不上、端口不通、找不到 SnowLuma，这里基本都有
+  - name: 安全问题请走私密
+    url: https://github.com/Wiseagull/afullife/security/advisories/new
+    about: 别开公开 issue，见 SECURITY.md

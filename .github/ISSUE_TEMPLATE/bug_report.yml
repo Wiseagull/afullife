@@ -1,0 +1,46 @@
+name: Bug 报告
+description: 哪一步不对、报了什么错
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先把这几样准备好，能省掉来回问：DSH 版本、Node 版本、你用的是 git 装的还是 zip 解压的。
+        **别贴 QQ 号、群号、令牌、`config.local.json` 的原文。**
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 你期望怎样、实际怎样
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 怎么复现
+      placeholder: |
+        1. 在私聊里发「…」
+        2. 它回了「…」（或者没回）
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: '`data/logs/dsh-supervisor.log` 里那几行就够了，**先自己看一眼有没有令牌/QQ号**'
+      render: text
+  - type: input
+    id: dsh
+    attributes:
+      label: DSH 版本
+      description: 设置 → 关于，或者 `dsh --version`
+  - type: input
+    id: node
+    attributes:
+      label: Node 版本
+      description: '`node -v`'
+  - type: dropdown
+    id: install
+    attributes:
+      label: 怎么装的
+      options: [git clone, 解压 zip, 我自己不清楚]

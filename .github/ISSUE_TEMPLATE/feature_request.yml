@@ -1,0 +1,24 @@
+name: 想法 / 功能建议
+description: 想让它多做点什么
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个项目的取舍写在 `docs/roadmap.md` 里（什么做完了、什么不做、为什么不做的）。
+        提之前可以扫一眼，免得撞上明确说过不做的。
+  - type: textarea
+    id: want
+    attributes:
+      label: 你想要什么
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么
+      description: 解决你什么问题；或者只是"我觉得这样更像人"
+  - type: textarea
+    id: how
+    attributes:
+      label: 你想到的做法（可选）

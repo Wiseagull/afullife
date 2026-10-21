@@ -1,0 +1,39 @@
+{
+  "name": "afullife",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把 QQ 接进 DeepSeek Harness：一个身份、一份记忆，横跨 QQ 和 DSH。",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "selftest": "node scripts/selftest.mjs",
+    "probe:gate": "node scripts/probe-gate.mjs",
+    "probe:social": "node scripts/probe-social.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "find:snowluma": "node scripts/find-snowluma.mjs",
+    "install:panel": "node scripts/install-panel.mjs",
+    "update": "node scripts/update.mjs",
+    "update:check": "node scripts/update.mjs --check"
+  },
+  "license": "GPL-3.0-or-later",
+  "keywords": [
+    "qq",
+    "onebot",
+    "deepseek",
+    "chatbot",
+    "agent",
+    "memory"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Wiseagull/afullife.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Wiseagull/afullife/issues"
+  },
+  "homepage": "https://github.com/Wiseagull/afullife#readme",
+  "author": "Wiseagull·Deriouze"
+}

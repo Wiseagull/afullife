@@ -1,0 +1,17 @@
+{
+  "owner": {
+    "userIds": [
+      "你的QQ号"
+    ]
+  },
+  "brain": {
+    "kind": "headless",
+    "headless": {
+      "workspace": "这里填这个项目的目录"
+    }
+  },
+  "send": {
+    "dryRun": true
+  },
+  "_comment": "只要填 owner.userIds 和 brain.headless.workspace。SnowLuma 的项目会自己找、自己读令牌；其余配置项首次运行会自动生成到 config.local.json。"
+}

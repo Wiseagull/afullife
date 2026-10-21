@@ -1,0 +1,9 @@
+# 统一用 LF，别让 Windows 的 autocrlf 把整库改成 CRLF
+* text=auto eol=lf
+
+# 二进制文件不要当文本处理
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.zip binary

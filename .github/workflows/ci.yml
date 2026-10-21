@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 不用 npm install：这个项目没有第三方运行时依赖
+      - name: 语法检查
+        run: |
+          find src scripts plugin -name '*.mjs' -o -name '*.js' | while read f; do
+            node --check "$f" || exit 1
+          done
+
+      - name: 自检（房间、路由、分条、记忆装配）
+        run: node scripts/selftest.mjs
+
+      - name: 闸的用例表
+        run: node scripts/probe-gate.mjs
+
+      - name: 社交状态机与分条
+        run: node scripts/probe-social.mjs
+
+      - name: 待确认（先问后改）
+        run: node scripts/probe-conflict.mjs
+
+      - name: 发布前扫一遍密钥与个人标识（只报告，不让 CI 红）
+        run: node scripts/check-secrets.mjs || true

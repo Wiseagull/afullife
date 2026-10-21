@@ -1,0 +1,108 @@
+// 房间：把 OneBot 的原始事件折成内部消息，并按房间取上下文。
+// 「房间」= 一个私聊或一个群。换的是屋子，不是人。
+
+export function roomKeyOf({ kind, id }) {
+  return kind === 'group' ? `group:${id}` : `private:${id}`;
+}
+
+export function segmentsToText(segments) {
+  if (!Array.isArray(segments)) return '';
+  const parts = [];
+  for (const seg of segments) {
+    const type = seg?.type;
+    const data = seg?.data || {};
+    if (type === 'text') parts.push(String(data.text ?? ''));
+    else if (type === 'at') parts.push(data.qq === 'all' ? '@全体' : `@${data.name || data.qq}`);
+    else if (type === 'image') parts.push('[图片]');
+    else if (type === 'face') parts.push('[表情]');
+    else if (type === 'mface') parts.push('[表情]');
+    else if (type === 'record') parts.push('[语音]');
+    else if (type === 'video') parts.push('[视频]');
+    else if (type === 'file') parts.push(`[文件 ${data.name || ''}]`.trim());
+    else if (type === 'reply') parts.push('[引用]');
+    else if (type === 'json') parts.push('[卡片]');
+    else if (type === 'forward') parts.push('[合并转发]');
+  }
+  return parts.join('');
+}
+
+/**
+ * 把 OneBot 事件折成内部消息；非消息事件返回 null。
+ * @returns {null | {room:string, kind:'private'|'group', id:string, msgId:number|null,
+ *   from:string, name:string, text:string, at:number, atMe:boolean}}
+ */
+export function normalizeEvent(raw, { selfId = '', selfNames = [] } = {}) {
+  if (!raw || raw.post_type !== 'message') return null;
+
+  const kind = raw.message_type === 'group' ? 'group' : raw.message_type === 'private' ? 'private' : '';
+  if (!kind) return null;
+
+  const id = String(kind === 'group' ? raw.group_id ?? '' : raw.user_id ?? '');
+  if (!id) return null;
+
+  const from = String(raw.user_id ?? raw.sender?.user_id ?? '');
+  if (selfId && from === String(selfId)) return null; // 自己说的话不回流
+
+  const name = String(raw.sender?.card || raw.sender?.nickname || from);
+  const segments = Array.isArray(raw.message) ? raw.message : null;
+  const text = segments ? segmentsToText(segments) : String(raw.raw_message ?? raw.message ?? '').trim();
+
+  const atSegs = segments ? segments.filter((s) => s?.type === 'at') : [];
+  const atMe = atSegs.some((s) => String(s?.data?.qq) === String(selfId) && selfId);
+  const images = segments
+    ? segments.filter((s) => s?.type === 'image')
+      .map((s) => String(s?.data?.url || s?.data?.file || ''))
+      .filter(Boolean)
+    : [];
+  const names = [selfNames].flat().filter(Boolean);
+  const calledByName = names.some((n) => text.includes(n));
+  const replySeg = segments ? segments.find((s) => s?.type === 'reply') : null;
+  const hasForward = segments ? segments.some((s) => s?.type === 'forward') : false;
+
+  return {
+    room: roomKeyOf({ kind, id }),
+    kind,
+    id,
+    msgId: raw.message_id ?? null,
+    from,
+    name,
+    text,
+    images,
+    at: Number(raw.time || Math.floor(Date.now() / 1000)),
+    atMe: atMe || calledByName,
+    // 引用：只留被引用那条的 id，正文由调用方去历史里捞
+    replyId: replySeg ? String(replySeg?.data?.id ?? '') : '',
+    hasForward,
+    forwardId: hasForward ? String(segments.find((s) => s?.type === 'forward')?.data?.id ?? '') : '',
+  };
+}
+
+/** 把一串事件渲染成给脑子看的对话记录（纯文本）。 */
+export function renderTranscript(events) {
+  return events.map((e) => {
+    const who = e.name || e.from || '?';
+    // 编号：她想引着某句回时，用 [[reply:编号]] 指过去
+    const num = e.idx ? `#${e.idx} ` : '';
+    // 引用：他在回哪一句，得摆在她眼前，不然她只能猜“这句是冲谁来的”
+    const quote = e.quoteText
+      ? `[引用 ${e.quoteName || '某人'}：${String(e.quoteText).replace(/\s+/g, ' ').slice(0, 60)}] `
+      : '';
+    const files = Array.isArray(e.imageFiles) ? e.imageFiles.filter(Boolean) : [];
+    let text = String(e.text ?? '');
+    if (quote) text = text.replace(/\[引用\]/g, '');
+    if (!files.length) return `${num}${who}: ${quote}${text.trim()}`;
+    // 正文里原本只有一个 [图片] 占位，换成真实路径——她当场就能 read_image
+    text = text.replace(/(\[图片\])+/g, '').trim();
+    const list = files.map((f, i) => `图片${i + 1}：${f}`).join('；');
+    return `${num}${who}: ${quote}${text}${text ? ' ' : ''}（${list}）`;
+  }).join('\n');
+}
+
+/** 引用的是哪句：拿 replyId 去最近的事件里捞原文。捞不到就返回 null。 */
+export function resolveQuote(msg, recent = []) {
+  const id = String(msg?.replyId || '');
+  if (!id) return null;
+  const hit = recent.find((e) => String(e.msgId ?? '') === id);
+  if (!hit) return null;
+  return { text: String(hit.text ?? ''), name: hit.name || hit.from || '某人' };
+}
