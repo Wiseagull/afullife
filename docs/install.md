@@ -205,6 +205,33 @@ node scripts/install-panel.mjs --uninstall    # 卸掉（项目文件不动）
 注意：装完不用重启 DSH，但**新开的一轮会话**才拿得到新工具；`bsk_*`（浏览器那套）
 只对装好之后**新建**的会话生效。
 
+### 省钱：让她闲聊时用「轻装」的那套（可选，但很值）
+
+装上的每个插件，它的工具说明都会**跟着每一轮、每一步重发一遍**。实测（同一句
+「说说你自己是谁」）：
+
+| 用哪套 profile | 每步上下文 |
+| --- | --- |
+| 全量（装了一堆工具） | **30,967** token |
+| 只留 base + headless | **9,558** token |
+
+差出来的两万多，一步就要算一次；一轮里她调几次工具，就是好几倍。所以我们建议做两套：
+
+```bash
+node scripts/make-chat-profile.mjs headless-chat
+```
+
+它会把当前的 headless profile 复制一份、`bundles` 只留 `dsh-base` + `dsh-headless`、
+把 credentials 打开，然后告诉你在 `config.local.json` 里加一行：
+
+```json
+"brain": { "headless": { "chatProfile": "headless-chat" } }
+```
+
+重启桥。之后闲聊的轮次自动走轻装，**要动手的轮次（改文件、画图、查东西）仍然用全量**——
+判断沿用桥里那套「像不像派活」，判错不要紧：轻装那套也有读写文件、搜网页、跑命令的基础工具，
+只是少了那些重家伙。
+
 ### 给 `dsh-image-gen` 补一个 `webServer`（可选）
 
 桌面版自带 `webServer` 服务（页面要用它），**headless 里没有**。`dsh-image-gen` 依赖它，

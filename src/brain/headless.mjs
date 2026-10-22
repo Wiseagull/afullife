@@ -39,6 +39,8 @@ const DEFAULTS = {
   node: GUESS.node,
   cli: GUESS.cli,
   profile: 'headless',
+  // 空 = 不换，始终用上面那套；填了就是「闲聊用的轻装 profile」
+  chatProfile: '',
   // 默认就在项目自己目录里干活：她画的东西、写的文件都落在这儿，不散到别的工作区
   workspace: ROOT,
   timeoutMs: 120000,
@@ -92,7 +94,7 @@ export class HeadlessBrain {
    *   onEvent 每收到一个 NDJSON 事件就同步调一次；返回 'abort' 就当场掐断这一轮。
    * @returns {Promise<{text: string, sessionId: string|null}>}
    */
-  async run({ prompt, sessionId = null, onEvent = null }) {
+  async run({ prompt, sessionId = null, onEvent = null, profile = null }) {
     const key = this.#apiKey();
     if (!key) {
       throw new Error(`找不到 ${this.cfg.apiKeyEnv}：环境变量没有，${this.cfg.credentialsFile} 里也没有`);
@@ -105,7 +107,8 @@ export class HeadlessBrain {
         + 'node 填 <DSH 安装目录>/DeepSeek Harness.exe',
       );
     }
-    const args = [this.cfg.cli, this.cfg.profile, '--json'];
+    // 按轮换 profile：闲聊用轻的那套（工具少，每步省两万 token），要动手才用全量
+    const args = [this.cfg.cli, profile || this.cfg.profile, '--json'];
     if (sessionId) args.push('--session-id', sessionId);
     args.push('-');
 

@@ -719,6 +719,10 @@ async function handleBatch(roomKey, msgs) {
     toolsJustUsed: touchedPrevRound,
   });
   const rulesText = verdict.full ? ruleOf(isGroup) : chatRules(isGroup);
+  // 工具也按需：闲聊走轻装 profile（工具少，每步省两万 token），要动手才切全量
+  const chatProfile = cfg.brain?.headless?.chatProfile || '';
+  const turnProfile = verdict.full || !chatProfile ? null : chatProfile;
+  if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
   const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor(isGroup), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey) });
   let prompt = sid
@@ -777,7 +781,7 @@ async function handleBatch(roomKey, msgs) {
     return onEvent(ev);
   };
   try {
-    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked });
+    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, profile: turnProfile });
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       const b = gate.blocked;
@@ -804,6 +808,7 @@ async function handleBatch(roomKey, msgs) {
         sessionId: null,
         room: roomKey,
         onEvent,
+        profile: turnProfile,
       });
     } catch (err2) {
       if (err2?.code === 'GATE_BLOCKED' && gate.blocked) {
@@ -847,6 +852,8 @@ async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
         const r = await brain.run({
           prompt: '（他就在私聊里等着你回话。刚才你想沉默，但这里不能沉默——回他一句，短一点也行。）\n' + oneLine(last.text ?? ''),
           sessionId: sessions.get(roomKey),
+          // 追这一句是闲聊，直接走轻装那套
+          profile: cfg.brain?.headless?.chatProfile || null,
         });
         return await finishTurn(roomKey, last, Object.assign({}, r, { __retried: true }), conflicts, msgs);
       } catch (e) {

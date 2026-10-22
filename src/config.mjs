@@ -127,6 +127,8 @@ const DEFAULTS = {
   },
   brain: {
     kind: 'none',             // none（只收不说话）| headless（起一次 DSH 干活）
+    // headless 的具体参数（profile / workspace / timeoutMs / chatProfile）在这里给默认，
+    // 真实值一般写在 config.local.json；chatProfile 留空 = 不换 profile。
   },
   memory: {
     // 房间 → { read: 能不能看别处, share: 能不能让别处看 }
