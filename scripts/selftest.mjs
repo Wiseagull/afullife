@@ -6,7 +6,7 @@ import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
 import { openingMood, draftLines, shouldYield } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
-import { buildPrompt } from '../src/body/prompt.mjs';
+import { buildPrompt, buildTriggerLines } from '../src/body/prompt.mjs';
 import { selfLines, agoLabel } from '../src/memory/context.mjs';
 import { SerialQueue } from '../src/body/queue.mjs';
 import { ROOT } from '../src/config.mjs';
@@ -126,6 +126,21 @@ ok('每段不超长', parts.every((p) => p.length <= 1200));
 ok('切分不丢字', parts.join('').replace(/\s/g, '') === long.replace(/\s/g, ''));
 
 check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
+
+// ── 群里也要看得见图 ────────────────────────────────────
+// 2026-10-22：群里走 buildTriggerLines，那儿原先只给一个 [图片] 占位，
+// 没有路径，她等于看不见图。私聊走 renderTranscript 一直是对的。
+{
+  const group = buildTriggerLines([
+    { idx: 1, name: '某某', text: '[图片]', imageFiles: ['E:/x/img1.jpg'], atMe: false },
+    { idx: 2, name: '某某', text: '你看这个', imageFiles: ['E:/x/img2.gif'], atMe: false },
+    { idx: 3, name: '某某', text: '没有图', atMe: false },
+  ], { selfNames: ['小鲸鱼'] });
+  ok('群里带图的消息给了真实路径', group[0].includes('E:/x/img1.jpg'));
+  ok('群里带图的消息不再只剩 [图片] 占位', !group[0].includes('[图片]'));
+  ok('群里带文字又带图，两样都在', group[1].includes('你看这个') && group[1].includes('E:/x/img2.gif'));
+  ok('群里没图的消息不被乱加括号', !group[2].includes('图片1'));
+}
 
 // ── 表情库 ──────────────────────────────────────────────
 // 用临时目录，绝不碰 data/stickers 里真那些图。

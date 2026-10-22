@@ -7,6 +7,20 @@ function textOf(m) {
   return String(m?.text ?? '').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * 带图的那句话：把正文里的 [图片] 占位换成真实路径，她当场就能 read_image。
+ *
+ * 私聊走 renderTranscript 时这段就做过了，群里走的是 buildTriggerLines——
+ * 2026-10-22 才发现那里没做：群里她只看到一个 [图片]，没有路径，等于看不见图。
+ */
+function textWithImages(m) {
+  const files = Array.isArray(m?.imageFiles) ? m.imageFiles.filter(Boolean) : [];
+  if (!files.length) return textOf(m);
+  const body = String(m?.text ?? '').replace(/(\[图片\])+/g, '').replace(/\s+/g, ' ').trim();
+  const list = files.map((f, i) => `图片${i + 1}：${f}`).join('；');
+  return `${body}${body ? ' ' : ''}（${list}）`;
+}
+
 /** 给一条消息打标签 —— 不替脑子判断，只把"这句像不像在跟人说话"摆在明面上。 */
 export function tagOf(m, selfNames = []) {
   const tags = [];
@@ -27,7 +41,7 @@ export function buildTriggerLines(messages, { selfNames = [] } = {}) {
       ? `[引用 ${m.quoteName || '某人'}：${String(m.quoteText).replace(/\s+/g, ' ').slice(0, 60)}] `
       : '';
     const num = m?.idx ? `#${m.idx} ` : '';
-    return `${num}${who}：${quote}${textOf(m)}${tags.length ? `  〔${tags.join('/')}〕` : ''}`;
+    return `${num}${who}：${quote}${textWithImages(m)}${tags.length ? `  〔${tags.join('/')}〕` : ''}`;
   });
 }
 
