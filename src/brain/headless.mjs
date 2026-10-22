@@ -154,6 +154,12 @@ export class HeadlessBrain {
       // 一步 = 模型看一遍上下文再决定下一步。步数用来算“每步上下文多大”，
       // 那个数才是真正决定单轮成本的东西（会话越长它越大）。
       let steps = 0;
+      // 超时的时候要知道卡在哪儿：最后一次事件是什么、多久之前、一共收到多少字节。
+      // 只在超时那条错误里出现，正常路径不受影响。
+      let lastEventAt = Date.now();
+      let lastEventKind = '';
+      let eventCount = 0;
+      let stdoutBytes = 0;
 
       const finish = (fn, value) => {
         if (settled) return;
@@ -165,7 +171,11 @@ export class HeadlessBrain {
       const timer = setTimeout(() => {
         // 连子进程树一起掐：它可能拉起了 SD 这种大程序，只杀爹会剩孤儿占着端口
         killTree(child);
-        finish(reject, new Error(`headless 超时（${this.cfg.timeoutMs}ms）`));
+        const stall = Math.round((Date.now() - lastEventAt) / 1000);
+        const where = lastEventKind
+          ? `最后一条事件 ${lastEventKind} 在 ${stall}s 前，共 ${eventCount} 条 / ${Math.round(stdoutBytes / 1024)}KB`
+          : `一条事件都没收到（0KB），卡在起进程或读 prompt 那一步`;
+        finish(reject, new Error(`headless 超时（${this.cfg.timeoutMs}ms，${where}）`));
       }, this.cfg.timeoutMs);
 
       const handleLine = (line) => {
@@ -173,6 +183,9 @@ export class HeadlessBrain {
         if (!s) return;
         let ev;
         try { ev = JSON.parse(s); } catch { return; }
+        lastEventAt = Date.now();
+        lastEventKind = String(ev.type || '?');
+        eventCount += 1;
         if (ev.type === 'session' && ev.sessionId) sessionId = String(ev.sessionId);
         else if (ev.type === 'final' && typeof ev.text === 'string') finalText = ev.text;
         else if (ev.type === 'text' && typeof ev.text === 'string') streamed += ev.text;
@@ -201,6 +214,7 @@ export class HeadlessBrain {
       };
 
       child.stdout.on('data', (b) => {
+        stdoutBytes += b.length;
         buf += b.toString('utf8');
         let idx;
         while ((idx = buf.indexOf('\n')) >= 0) {

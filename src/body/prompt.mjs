@@ -1,6 +1,6 @@
 // 给脑子看的提示词：房间 + 背景 + 现在要回的。
 // 这里只管"把现场摆清楚"，人格由 AGENTS.md 负责，不在这重复。
-import { renderTranscript } from './room.mjs';
+import { renderTranscript, shortenQuote } from './room.mjs';
 import { ROOT } from '../config.mjs';
 
 function textOf(m) {
@@ -38,7 +38,7 @@ export function buildTriggerLines(messages, { selfNames = [] } = {}) {
     const tags = tagOf(m, selfNames);
     const who = m?.name || m?.from || '?';
     const quote = m?.quoteText
-      ? `[引用 ${m.quoteName || '某人'}：${String(m.quoteText).replace(/\s+/g, ' ').slice(0, 60)}] `
+      ? `[引用 ${m.quoteName || '某人'}：${shortenQuote(m.quoteText)}] `
       : '';
     const num = m?.idx ? `#${m.idx} ` : '';
     return `${num}${who}：${quote}${textWithImages(m)}${tags.length ? `  〔${tags.join('/')}〕` : ''}`;

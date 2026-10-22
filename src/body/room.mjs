@@ -85,7 +85,7 @@ export function renderTranscript(events) {
     const num = e.idx ? `#${e.idx} ` : '';
     // 引用：他在回哪一句，得摆在她眼前，不然她只能猜“这句是冲谁来的”
     const quote = e.quoteText
-      ? `[引用 ${e.quoteName || '某人'}：${String(e.quoteText).replace(/\s+/g, ' ').slice(0, 60)}] `
+      ? `[引用 ${e.quoteName || '某人'}：${shortenQuote(e.quoteText)}] `
       : '';
     const files = Array.isArray(e.imageFiles) ? e.imageFiles.filter(Boolean) : [];
     let text = String(e.text ?? '');
@@ -98,11 +98,32 @@ export function renderTranscript(events) {
   }).join('\n');
 }
 
+/** 引用那一行：太长就截断，但带图片路径的不能截——截了路径就废了。 */
+export function shortenQuote(text) {
+  const t = String(text ?? '').replace(/\s+/g, ' ');
+  return t.includes('（附图：') ? t : t.slice(0, 60);
+}
+
+/**
+ * 引用正文 + 落盘路径：有图就把「（附图：…）」接在后面，正文里的 [图片] 占位去掉。
+ * 没图就原样返回（一个字都不动）。
+ */
+export function withFiles(text, files = []) {
+  const raw = String(text ?? '');
+  const list = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (!list.length) return raw;
+  const bare = raw.replace(/(\[图片\])+/g, '').trim();
+  return `${bare}${bare ? ' ' : ''}（附图：${list.join('；')}）`;
+}
+
 /** 引用的是哪句：拿 replyId 去最近的事件里捞原文。捞不到就返回 null。 */
 export function resolveQuote(msg, recent = []) {
   const id = String(msg?.replyId || '');
   if (!id) return null;
   const hit = recent.find((e) => String(e.msgId ?? '') === id);
   if (!hit) return null;
-  return { text: String(hit.text ?? ''), name: hit.name || hit.from || '某人' };
+  // 被引用的是张图：光写「[图片]」她等于没看见（19:11 他就问过「你知道我说的是哪一张吗」）。
+  // 那条我们落过盘，把路径一起带上，她当场就能 read_image。
+  const files = Array.isArray(hit.imageFiles) ? hit.imageFiles.filter(Boolean) : [];
+  return { text: withFiles(hit.text, files), name: hit.name || hit.from || '某人', files };
 }

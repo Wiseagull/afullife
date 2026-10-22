@@ -43,7 +43,7 @@ import { cleanupImages } from './media/cleanup.mjs';
 import { StickerLibrary } from './stickers/library.mjs';
 import { isYes, isNo } from './util/yesno.mjs';
 import { auditReply } from './safety/audit.mjs';
-import { resolveQuote } from './body/room.mjs';
+import { resolveQuote, withFiles } from './body/room.mjs';
 
 const L = (tag, ...args) => log(tag, ...args);
 
@@ -353,12 +353,14 @@ function sniffImage(buf) {
   return null;
 }
 
-/** 把收到的图存到本地 —— 存不下的就跳过，不能因为一张图把消息丢了。 */
-async function saveImages(msg) {
+/** 把一组图地址存到本地 —— 存不下的就跳过，不能因为一张图把消息丢了。 */
+async function saveImageUrls(urls, tag) {
   const dir = path.join(cfg.dataDir, 'images');
   fs.mkdirSync(dir, { recursive: true });
+  // 名字里的 tag 有时是从消息段直接来的（被引用的 id），别让它带出路径分隔符
+  const safeTag = String(tag ?? '').replace(/[^\w.-]/g, '_').slice(0, 60) || String(Date.now());
   const files = [];
-  for (const [i, url] of msg.images.entries()) {
+  for (const [i, url] of urls.entries()) {
     try {
       const res = await fetch(url);
       if (!res.ok) continue;
@@ -366,12 +368,16 @@ async function saveImages(msg) {
       // 按文件头定扩展名：QQ 给的地址后缀经常是假的（.png 里装 jpg），
       // 名字错了 read_image 会直接拒读，所以宁可自己嗅一遍。
       const ext = sniffImage(buf) || (url.match(/\.(png|jpe?g|gif|webp)/i)?.[1] || 'png').toLowerCase();
-      const file = path.join(dir, `${msg.msgId || Date.now()}-${i}.${ext}`);
+      const file = path.join(dir, `${safeTag}-${i}.${ext}`);
       fs.writeFileSync(file, buf);
       files.push(file);
     } catch { /* ignore */ }
   }
   return files;
+}
+
+async function saveImages(msg) {
+  return saveImageUrls(msg.images, msg.msgId || Date.now());
 }
 
 /** 直接从桥说话（不是"我"说的那种）—— 审批问答、报错都走这儿。 */
@@ -544,11 +550,19 @@ client.on('event', async (raw) => {
         // client.call 直接返回 json.data，别再套一层 .data
         const data = await client.call('get_msg', { message_id: Number(msg.replyId) });
         const segs = Array.isArray(data?.message) ? data.message : null;
-        const text = segs ? segmentsToText(segs) : String(data?.raw_message ?? '');
+        const raw = segs ? segmentsToText(segs) : String(data?.raw_message ?? '');
+        // 太老的那条要是张图，QQ 只回「[图片]」——跟 19:11 那个坑一样看不见。
+        // 那就当场把图下下来落盘，路径接在引用后面。
+        const urls = segs
+          ? segs.filter((s) => s?.type === 'image')
+            .map((s) => String(s?.data?.url || s?.data?.file || '')).filter(Boolean)
+          : [];
+        const files = urls.length ? await saveImageUrls(urls, `quoted-${msg.replyId}`) : [];
+        const text = withFiles(raw, files);
         if (String(text).trim()) {
           msg.quoteText = String(text).trim();
           msg.quoteName = String(data?.sender?.card || data?.sender?.nickname || data?.sender?.user_id || '某人');
-          L('quote', `取回被引用的一条：${msg.quoteText.slice(0, 40)}`);
+          L('quote', `取回被引用的一条：${msg.quoteText.slice(0, 40)}${files.length ? `（附图 ${files.length} 张）` : ''}`);
         }
       } catch (e) {
         L('quote', `取不回被引用的那条：${e?.message ?? e}`);

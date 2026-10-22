@@ -1,6 +1,6 @@
 // 自测：不用真的连 QQ，把合成事件喂进管道看判断对不对。
 // node scripts/selftest.mjs
-import { normalizeEvent } from '../src/body/room.mjs';
+import { normalizeEvent, resolveQuote, shortenQuote, renderTranscript, withFiles } from '../src/body/room.mjs';
 import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
@@ -378,6 +378,69 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('清掉代码块', cleanHandover(['```js', 'x', '```', '好'].join(String.fromCharCode(10))), '好');
   check('超长按句子截断', cleanHandover('甲。乙。丙。', { maxChars: 3 }), '甲。乙');
   check('没句号就硬切', cleanHandover('甲乙丙丁', { maxChars: 2 }).length <= 2, true);
+}
+
+// ── headless 超时：要说清卡在哪儿 ────────────────────────
+// 三天里 6 次体检超时，日志只有一句「headless 超时（300000ms）」，
+// 分不出是模型慢、CLI 卡住，还是一条事件都没起来。现在错误里带最后一条事件。
+{
+  const { HeadlessBrain } = await import('../src/brain/headless.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-selftest-hl-'));
+  try {
+    const fake = path.join(dir, 'fake-cli.mjs');
+    fs.writeFileSync(fake, [
+      "process.stdin.resume();",
+      "console.log(JSON.stringify({ type: 'session', sessionId: 'fake-1' }));",
+      "setTimeout(() => {}, 60000);",
+    ].join('\n'), 'utf8');
+    process.env.DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'selftest-key';
+    const brain = new HeadlessBrain({ node: process.execPath, cli: fake, workspace: dir, timeoutMs: 1200 });
+    let msg = '';
+    try {
+      await brain.run({ prompt: '随便' });
+    } catch (err) {
+      msg = String(err?.message || err);
+    }
+    ok('假 cli 挂住会超时', msg.includes('headless 超时'));
+    ok('超时说得出最后一条事件', msg.includes('最后一条事件 session'));
+    ok('超时带停顿秒数和条数', /在 \d+s 前，共 1 条/.test(msg));
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// ── 引用的是张图：路径得摆出来 ──────────────────────────
+// 19:11 他发了张图问「你知道我说的是哪一张吗」——被引用的图只写「[图片]」，
+// 她等于没看见。现在把落盘路径一起带进引用行，而且不截断。
+{
+  const recent = [
+    { msgId: '100', name: '先生', text: '[图片]', imageFiles: ['E:/ws/data/images/a-0.jpg'] },
+    { msgId: '101', name: '先生', text: '看这张' },
+  ];
+  const q = resolveQuote({ replyId: '100' }, recent);
+  ok('引用图时带上落盘路径', Boolean(q && q.text.includes('E:/ws/data/images/a-0.jpg')));
+  ok('引用图不再只写 [图片]', Boolean(q && !q.text.includes('[图片]')));
+  check('引用普通话原样返回', resolveQuote({ replyId: '101' }, recent).text, '看这张');
+  check('引用捞不到返回 null', resolveQuote({ replyId: '999' }, recent), null);
+
+  const longPath = `（附图：${'E:/ws/data/images/'.repeat(3)}a-0.jpg）`;
+  const long = `看这张 ${longPath}`;
+  check('带路径的引用不截断', shortenQuote(long), long);
+  check('普通长引用仍截到 60', shortenQuote('x'.repeat(100)).length, 60);
+
+  const line = renderTranscript([{ name: '她', text: '这是哪张', quoteText: long, quoteName: '先生' }]);
+  ok('对话记录里路径完整没被切', line.includes(longPath));
+}
+
+// ── 被引用的是很老的图：兜底也要落盘带路径 ──────────────────
+// 不在最近 50 条时走 get_msg，QQ 只回「[图片]」。现在当场下下来落盘，
+// 用 withFiles 把路径接上去——跟最近 50 条那条路一样能 read_image。
+{
+  check('没图就原样返回', withFiles('看这张', []), '看这张');
+  check('空正文带图只留附图', withFiles('[图片]', ['E:/ws/q-0.jpg']), '（附图：E:/ws/q-0.jpg）');
+  check('多张图去重占位', withFiles('[图片][图片]', ['a.jpg', 'b.gif']), '（附图：a.jpg；b.gif）');
+  check('有字有图空格分开', withFiles('看这个[图片]', ['a.jpg']), '看这个 （附图：a.jpg）');
+  check('正文为空也能拼', withFiles('', ['a.jpg']), '（附图：a.jpg）');
 }
 
 // ── 结果 ────────────────────────────────────────────────
