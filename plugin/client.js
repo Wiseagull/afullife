@@ -572,12 +572,31 @@ window.__ModuleLoader__.load({
       // 会话轮换阈值：每步上下文超过这个数就换新会话（见 docs/design.md「省钱的三个杠杆」）
       const [rotate, setRotate] = useState(60000);
       const [rotateMsg, setRotateMsg] = useState('');
+      const [handover, setHandover] = useState({ enabled: true, inner: true });
+      const [handoverMsg, setHandoverMsg] = useState('');
+      const saveHandover = async (patch) => {
+        const next = Object.assign({}, handover, patch);
+        setHandover(next);
+        setHandoverMsg('');
+        try {
+          await api('/api/config', { method: 'POST', body: JSON.stringify({ brain: { headless: { handover: next } } }) });
+          setHandoverMsg('存好了');
+        } catch (e) {
+          setHandoverMsg('没存上：' + e.message);
+        }
+      };
       const loadRotate = () => api('/api/config')
         .then((r) => {
           const v = r && r.config && r.config.brain && r.config.brain.headless
             ? r.config.brain.headless.rotateAtTokens
             : undefined;
           if (v !== undefined && v !== null) setRotate(v);
+          const h = r && r.config && r.config.brain && r.config.brain.headless
+            ? r.config.brain.headless.handover
+            : undefined;
+          if (h && typeof h === 'object') {
+            setHandover({ enabled: h.enabled !== false, inner: h.inner !== false });
+          }
         })
         .catch(() => {});
       const saveRotate = async () => {
@@ -709,6 +728,25 @@ window.__ModuleLoader__.load({
             h('button', { style: S.btn(false), onClick: saveRotate }, '保存'),
           ),
           rotateMsg ? h('div', { style: S.tiny }, rotateMsg) : null,
+          // 换会话那一刻，让旧会话写一张纸条给新的自己（见 src/memory/handover.mjs）
+          h('div', { style: { marginTop: 10 } },
+            h('div', { style: S.tiny }, '换会话时，让她把刚才那段"过程"写一张纸条留给自己（调过什么工具、为什么这么定、卡在哪）。纸条进记忆，新会话下一轮就读得到。'),
+            h('div', { style: { display: 'flex', gap: 14, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+              h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                h(Toggle, {
+                  value: !!(handover && handover.enabled),
+                  onChange: (v) => saveHandover({ enabled: v }),
+                }),
+                h('span', { style: S.tiny }, '换会话时写交接')),
+              h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                h(Toggle, {
+                  value: !!(handover && handover.inner),
+                  onChange: (v) => saveHandover({ inner: v }),
+                }),
+                h('span', { style: S.tiny }, '连"没说出口的判断"一起写（会存进记忆）')),
+            ),
+            handoverMsg ? h('div', { style: S.tiny }, handoverMsg) : null,
+          ),
         ),
       );
     }

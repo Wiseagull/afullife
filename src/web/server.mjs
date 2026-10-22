@@ -27,6 +27,7 @@ const EDITABLE = [
   'debounceMs',
   'brain.headless.chatProfile',
   'brain.headless.rotateAtTokens',
+  'brain.headless.handover',
   'ack',
   'send.split',
   'send.gapMs',

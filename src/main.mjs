@@ -12,13 +12,14 @@ import { EventLog } from './memory/events.mjs';
 import { SelfDrafts } from './memory/selfdrafts.mjs';
 import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mjs';
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
-import { renderForwardNodes, pickNodes } from './body/forward.mjs';
+import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
 import { buildPrompt, buildFollowup, NOPOWER_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
 import { setWorkspaceRoots, underWorkspace } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
 import { NotesStore } from './memory/notes.mjs';
+import { makeHandover } from './memory/handover.mjs';
 import { buildBackground, buildDelta, selfLines } from './memory/context.mjs';
 import { PendingStore } from './memory/pending.mjs';
 import { InterestStore } from './interests/store.mjs';
@@ -102,7 +103,14 @@ client.on('status', (s) => {
 const sender = new Sender({ client, ...cfg.send, split: cfg.send.split, logger: L });
 const events = new EventLog({ dir: path.join(cfg.dataDir, 'events') });
 const router = createRouter({ cfg });
+// 说话锁：要开口的活排这条队，一个我一次只说一句。
+// 优先级：他的一句话（前景）先上，自己找的事（冷场试探、主动开话题）让路。
 const queue = new SerialQueue({ logger: L });
+// 后台道：整理记忆、体检——只干活不说话，单独一条。
+// 从前它们跟回话共用一条队，一次体检能跑五分钟，那五分钟里他发什么都在后面排着。
+const bgQueue = new SerialQueue({ logger: L });
+/** 前景任务的优先级：比"自己找的事"先跑（0 是后台道的默认）。 */
+const FG = 10;
 const pokeCooldown = new PokeCooldown(cfg.poke?.cooldownMs ?? 30000);
 const brain = createBrain(cfg, L);
 const sessions = new SessionMap({ file: path.join(cfg.dataDir, 'sessions.json') });
@@ -285,7 +293,7 @@ function recordUsage(roomKey, result, kind = 'chat') {
 
 const REMEMBER_RE = /(记住|记一下|记下|别忘了|remember)/i;
 const debounce = new Debounce(cfg.debounceMs, (roomKey, msgs) => {
-  queue.push(() => handleBatch(roomKey, msgs), roomKey);
+  queue.push(() => handleBatch(roomKey, msgs), roomKey, { priority: FG });
 });
 
 // 人格三层都从项目里的 persona/ 读，按场合拼进提示词：
@@ -494,7 +502,7 @@ async function handlePoke(raw) {
     };
     events.append({ dir: 'in', room, kind: msg.kind, id: msg.id, from: msg.from, name: msg.name, text: msg.text, poke: true });
     lastActivityAt = Date.now();
-    queue.push(() => handleBatch(room, [msg]), room);
+    queue.push(() => handleBatch(room, [msg]), room, { priority: FG });
   } catch (err) {
     L('poke', `处理戳一戳出错：${err?.message ?? err}`);
   }
@@ -509,16 +517,17 @@ client.on('event', async (raw) => {
   const msg = normalizeEvent(raw, { selfId: client.selfId, selfNames: selfNames() });
   if (!msg) return;
 
-  // 合并转发只来个空壳，内容得按外层消息的 message_id 去取
+  // 合并转发只来个空壳，内容得按转发卡里的 res_id 去取
+  // （负数的 message_id 在 SnowLuma 那边会被当成 res_id 直接拒掉，见 body/forward.mjs）
   if (msg.hasForward) {
     try {
-      const res = await client.call('get_forward_msg', { message_id: Number(msg.msgId) });
-      const ex = renderForwardNodes(pickNodes(res));
+      const { nodes, via } = await loadForwardNodes(client, { msgId: msg.msgId, forwardId: msg.forwardId });
+      const ex = renderForwardNodes(nodes);
       if (ex) {
         msg.text = String(msg.text).replace('[合并转发]', ex.text);
-        L('forward', `${msg.room} 展开了 ${ex.shown}/${ex.count} 条`);
+        L('forward', `${msg.room} 展开了 ${ex.shown}/${ex.count} 条（${via}）`);
       } else {
-        L('forward', '取回来是空的，保留占位');
+        L('forward', `取回来是空的，保留占位（${via}）`);
       }
     } catch (e) {
       L('forward', `展开失败，保留占位：${e?.message ?? e}`);
@@ -618,7 +627,7 @@ client.on('event', async (raw) => {
       gate.approve(a.tool, a.input);
       gate.approveRule(a.verdict.ruleId);
       L('gate', `他答应了：${a.verdict.why}`);
-      queue.push(() => rerunApproved(a), a.roomKey);
+      queue.push(() => rerunApproved(a), a.roomKey, { priority: FG });
       return;
     } else if (isNo(said)) {
       const a = awaiting;
@@ -682,9 +691,26 @@ async function handleBatch(roomKey, msgs) {
   const rotateAt = Number(cfg.brain?.headless?.rotateAtTokens ?? 60000);
   // rotateAt 写 0 或负数 = 不轮换（否则 perStep > 0 会每轮都换，等于没有记忆）
   if (rotateAt > 0 && perStep > rotateAt && sessions.get(roomKey)) {
+    const oldSid = sessions.get(roomKey);
     sessions.clear(roomKey);
     contextPerStep.delete(roomKey);
     L('brain', `会话上下文 ${perStep} token 够大了（阈值 ${rotateAt}），这个房间换新会话`);
+    // 那段"过程"（调过什么工具、读了哪些文件、为什么这么定）只存在旧会话里，events 里没有。
+    // 排队让它自己写一张交接纸条，落进记忆——新会话下一轮就读得到。
+    const hcfg = cfg.brain?.headless?.handover || {};
+    if (hcfg.enabled !== false) {
+      queue.push(() => makeHandover({
+        brain,
+        sessionId: oldSid,
+        roomKey,
+        roomName: roomNames.nameOf(roomKey),
+        notes,
+        logger: L,
+        includeInner: hcfg.inner !== false,
+        maxChars: Number(hcfg.maxChars) || 1200,
+        profile: cfg.brain?.headless?.chatProfile || null,
+      }).catch((e) => L('memory', `交接没写成：${e.message}`)), 'handover');
+    }
   }
 
   const sid = sessions.get(roomKey);
@@ -1067,6 +1093,10 @@ if (worker) {
   // 后台活跟"回话"共用一条队列（必须如此，一个我一次只能说一句），
   // 所以有人刚说完话的时候不许它们占着——体检一次能跑五分钟，
   // 那五分钟里她一个字都说不出来，看起来就是"不回消息"。
+  // 后台活走自己那条道（bgQueue），不占说话锁。
+  // 它们一个字都不会说，却跟回话共用一条队——体检一次五分钟，
+  // 那五分钟里他发什么都在后面排着，看起来就是"不回消息"。
+  // 仍然守着"闲了才跑"：有人刚说完话的时候不上，别跟他抢机器。
   const pushWhenIdle = (fn, label, { quiet = 120000 } = {}) => () => {
     const quietFor = Date.now() - lastActivityAt;
     if (quietFor < quiet) {
@@ -1076,7 +1106,7 @@ if (worker) {
       return;
     }
     const t0 = Date.now();
-    queue.push(async () => {
+    bgQueue.push(async () => {
       const waited = Date.now() - t0;
       if (waited > 10000) L('queue', `${label} 排了 ${Math.round(waited / 1000)}s 才轮到`);
       return fn();
@@ -1207,6 +1237,16 @@ async function shutdown(sig) {
   L('exit', `收到 ${sig}，收尾中…`);
   try { await debounce.drain(); } catch { /* ignore */ }
   try { await queue.drain(); } catch { /* ignore */ }
+  // 后台那道（体检/整理）一次能跑几分钟：等它就等于关不掉窗口。
+  // 给它 8 秒，没跑完就随进程一起结束——那些活都是可重来的，卡住收尾才是真麻烦。
+  try {
+    let t = null;
+    await Promise.race([
+      bgQueue.drain(),
+      new Promise((r) => { t = setTimeout(r, 8000); t.unref?.(); }),
+    ]);
+    if (t) clearTimeout(t);
+  } catch { /* ignore */ }
   client.close();
   try { lock.release(); } catch { /* ignore */ }
   L('exit', '已停止');

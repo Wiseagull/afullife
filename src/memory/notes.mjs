@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-const KINDS = new Set(['约定', '偏好', '事实', '待办']);
+const KINDS = new Set(['约定', '偏好', '事实', '待办', '交接']);
 
 function nowIso() {
   const d = new Date();

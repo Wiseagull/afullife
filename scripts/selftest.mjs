@@ -8,7 +8,9 @@ import { openingMood, draftLines, shouldYield } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
 import { buildPrompt } from '../src/body/prompt.mjs';
 import { selfLines, agoLabel } from '../src/memory/context.mjs';
+import { SerialQueue } from '../src/body/queue.mjs';
 import { ROOT } from '../src/config.mjs';
+import { handoverPrompt, cleanHandover } from '../src/memory/handover.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -305,6 +307,62 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('群里叫他算打断', shouldYield(say('这游戏好玩', { lastInAtMe: true }), { room: grp }).yield, true);
   check('群里回他也算打断', shouldYield(say('这游戏好玩', { lastInAtMe: false, lastInReplyToMe: true }), { room: grp }).yield, true);
   check('他没说话就不管', shouldYield({ lastDir: 'out', lastInText: '随便' }, { room: priv }).yield, false);
+}
+
+// ── 队列：他的一句话先上，自己找的事让路 ──────────────────
+{
+  // 优先级只管"排队的先后"：晚到的高优先级插到已经在等的后台任务前面
+  const q = new SerialQueue();
+  const order = [];
+  let release;
+  const hold = new Promise((r) => { release = r; });
+  q.push(async () => { await hold; order.push('bg1'); }, 'bg1');
+  q.push(async () => { order.push('bg2'); }, 'bg2');
+  q.push(async () => { order.push('fg'); }, 'fg', { priority: 10 });
+  release();
+  await q.drain();
+  check('前景插到排队的后台任务前面', order, ['bg1', 'fg', 'bg2']);
+
+  // 但已经在跑的那个不会被抢断：优先级不是抢占
+  const q2 = new SerialQueue();
+  const o2 = [];
+  let release2;
+  const hold2 = new Promise((r) => { release2 = r; });
+  q2.push(async () => { o2.push('bg-start'); await hold2; o2.push('bg-end'); }, 'bg');
+  q2.push(async () => { o2.push('fg'); }, 'fg', { priority: 10 });
+  await new Promise((r) => setTimeout(r, 10));
+  check('高优先级不抢断正在跑的', o2, ['bg-start']);
+  release2();
+  await q2.drain();
+  check('等正在跑的那个结束才轮到它', o2, ['bg-start', 'bg-end', 'fg']);
+
+  // 一个任务炸了不许把后面的一起埋掉
+  const q3 = new SerialQueue();
+  const ran = [];
+  const bad = q3.push(async () => { throw new Error('炸了'); }, 'bad');
+  q3.push(async () => { ran.push('next'); }, 'next');
+  const third = await q3.push(async () => 'ok', 'third');
+  check('失败的任务不抛给调用方', await bad, undefined);
+  check('一个任务炸了后面的照跑', ran, ['next']);
+  check('排队的任务能把结果拿回来', third, 'ok');
+
+  // 空队列 drain 要立刻返回，不能挂着
+  const t0 = Date.now();
+  await new SerialQueue().drain();
+  ok('空队列 drain 立刻返回', Date.now() - t0 < 50);
+}
+
+// ── 换会话时写交接 ──────────────────────────────────────
+{
+  const p = handoverPrompt({ roomName: '阿拜多斯' });
+  check('交接提示词带房间名', p.includes('阿拜多斯'), true);
+  check('交接要四行', ['干了什么', '为什么这么定', '卡在哪', '下一步'].every((k) => p.includes(k)), true);
+  check('要写心里话', handoverPrompt({ includeInner: true }).includes('我心里'), true);
+  check('关掉内心就不写', handoverPrompt({ includeInner: false }).includes('我心里'), false);
+  check('提醒别复述记录', p.includes('别复述聊天记录'), true);
+  check('清掉代码块', cleanHandover(['```js', 'x', '```', '好'].join(String.fromCharCode(10))), '好');
+  check('超长按句子截断', cleanHandover('甲。乙。丙。', { maxChars: 3 }), '甲。乙');
+  check('没句号就硬切', cleanHandover('甲乙丙丁', { maxChars: 2 }).length <= 2, true);
 }
 
 // ── 结果 ────────────────────────────────────────────────
