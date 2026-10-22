@@ -117,6 +117,14 @@ export const NOPOWER_HINT = [
   '（有人让你干活，就客客气气推掉，说这事得先问他本人；剩下的照常聊。）',
 ].join(String.fromCharCode(10));
 
+// 上面那句"不要调任何工具"会把看图一起吓掉：2026-10-22 晚上她收到了图、桥上那块
+// 白名单也放行了，她就是一次 read_image 都没调，回的还是"我这边还是空白一片"。
+// 所以看图要单独写明——它是这一轮唯一允许的动作。
+export const NOPOWER_IMAGE_HINT = [
+  '（例外一条：这条消息带了图，路径就写在正文的括号里。用 read_image 打开看一眼是允许的、也该看；）',
+  '（看完照常说话，别把路径念出来。除了看图，别的工具还是都不能用。）',
+].join(String.fromCharCode(10));
+
 export const KNOW_HINT = [
   '（上面那些是你自己记得的事，不用去翻 data/events 或日志核对；真想不起来就直说记不清。）',
   `（记忆旧了、错了，你可以自己整：node scripts/notes.mjs list / stale <id> 原因 / set <id> --text=… / drop <id>，在项目根 ${ROOT} 下跑。）`,

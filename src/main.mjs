@@ -13,7 +13,7 @@ import { SelfDrafts } from './memory/selfdrafts.mjs';
 import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mjs';
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
-import { buildPrompt, buildFollowup, NOPOWER_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
+import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
 import { setWorkspaceRoots, underWorkspace, allowImageRead } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
@@ -809,8 +809,19 @@ async function handleBatch(roomKey, msgs) {
     })
     : promptFresh;
 
+  // 这一批里别人发的图：就算不许动手，也得让她看一眼，不然群里她永远"打不开"。
+  // 要放在拼提示词之前——"这一轮带图、看图是允许的"这句话得先落到她眼前，
+  // 否则会被上面那句"不要调任何工具"一起挡掉（2026-10-22 晚上就是这么坏的一晚）。
+  const batchImages = new Set(
+    msgs.flatMap((m) => (Array.isArray(m.imageFiles) ? m.imageFiles : []))
+      .filter(Boolean)
+      .map((f) => path.resolve(f)),
+  );
   const fromOwnerEarly = isRoot(last.from);
-  if (!fromOwnerEarly) prompt += '\n\n' + NOPOWER_HINT;
+  if (!fromOwnerEarly) {
+    prompt += '\n\n' + NOPOWER_HINT;
+    if (batchImages.size) prompt += '\n' + NOPOWER_IMAGE_HINT;
+  }
 
   // 谁能让她动手，只看"这话是谁说的"：
   //   - 特权号说的 → 直通（只记账）；整批都是特权号，才算真直通
@@ -822,12 +833,6 @@ async function handleBatch(roomKey, msgs) {
   // 就变成了"主人授权"。现在混批一律收手——他要动手，单独发一条就行。
   const trusted = msgs.length > 0 && msgs.every((m) => isRoot(m.from));
   const fromOwner = isRoot(last.from);
-  // 这一批里别人发的图：就算不许动手，也得让她看一眼，不然群里她永远"打不开"
-  const batchImages = new Set(
-    msgs.flatMap((m) => (Array.isArray(m.imageFiles) ? m.imageFiles : []))
-      .filter(Boolean)
-      .map((f) => path.resolve(f)),
-  );
   const onEvent = trusted
     ? makeAuditOnEvent(roomKey)
     : makeDenyAllOnEvent(roomKey, batchImages);
