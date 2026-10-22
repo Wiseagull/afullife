@@ -804,25 +804,29 @@ async function handleBatch(roomKey, msgs) {
   // 主人说话 → 核心人设（含称呼、关系、边界）；别人说话 → 只给对外的群聊手册。
   // 2026-10-22 晚上：陌生人私聊里她一口一个"先生"，就是因为私聊也吃到了核心人设。
   const allOwner = msgs.length > 0 && msgs.every((m) => isRoot(m.from));
+  // 主人以外的人，私聊也按"群聊"那套对待（主人 m13194 的原话）：
+  // 一样的对外人设、一样的群聊规程、一样的垫话、一样的"不是每句都接"。
+  // 房间仍然是私聊房间（发消息、记事件都还按原样），只是"该怎么说话"按群来。
+  const asGroup = isGroup || !allOwner;
   // 规程按需挂：闲聊只留四句，像要派活才挂全套。
   // 判错不要紧——规程不是权限，工具每轮都在，没挂说明她也照样能调。
   const verdict = judgeFull({
-    isGroup,
+    isGroup: asGroup,
     messages: msgs,
     addressed,
     toolsJustUsed: touchedPrevRound,
   });
-  const rulesText = verdict.full ? ruleOf(isGroup) : chatRules(isGroup);
+  const rulesText = verdict.full ? ruleOf(asGroup) : chatRules(asGroup);
   // 工具也按需：闲聊走轻装 profile（工具少，每步省两万 token），要动手才切全量
   const chatProfile = cfg.brain?.headless?.chatProfile || '';
   const turnProfile = verdict.full || !chatProfile ? null : chatProfile;
   if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup, isOwner: allOwner }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey) });
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey) });
   let prompt = sid
     ? buildFollowup(msgs, {
-      delta, isGroup, addressed, selfNames: names, stickerLine,
-      personaNote: personaNoteFor({ isGroup, isOwner: allOwner }),
+      delta, isGroup: asGroup, addressed, selfNames: names, stickerLine,
+      personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner }),
       rules: verdict.full ? rulesText : '',
       usageLine: usageLineFor(roomKey),
     })
@@ -863,7 +867,7 @@ async function handleBatch(roomKey, msgs) {
   // 真干起来要时间（尤其她翻文件、画图的时候），先给一句话，别让人干等着。
   // 说什么、说不说都写在 config 里（ack.private / ack.group），不再写死在代码里。
   const ackCfg = cfg.ack ?? {};
-  const ackList = (isGroup ? ackCfg.group : ackCfg.private) ?? [];
+  const ackList = (asGroup ? ackCfg.group : ackCfg.private) ?? [];
   const ackMs = Number(ackCfg.delayMs ?? cfg.ackDelayMs ?? 20000);
   const canAck = ackCfg.enabled !== false && ackList.length > 0 && ackMs > 0;
   let ackTimer = canAck

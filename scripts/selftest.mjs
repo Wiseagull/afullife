@@ -89,8 +89,14 @@ const cfg = {
 const router = createRouter({ cfg });
 
 check('主人在私聊', router.decide({ kind: 'private', from: '1000000001' }).speak, true);
-// 陌生人私聊也回（默认 privatePolicy='all'），只是没有动手权限——权限那关在闸上，不在路由上
-check('陌生人私聊也回', router.decide({ kind: 'private', from: '999' }).speak, true);
+// 陌生人的私聊从 2026-10-22 起按群聊那套走（主人 m13194）：
+// 不再"是私聊就每句都应"，而是进社交状态机——第一次来的生人，先听着。
+const strangerRoom = 'private:999';
+check('陌生人私聊不再恒回', router.decide({ kind: 'private', room: strangerRoom, from: '999', text: '你好' }).speak, false);
+// 但被点名／问到关键词，照样接
+check('陌生人私聊里提到关键词', router.decide({ kind: 'private', room: strangerRoom, from: '999', text: '测试bot在吗' }).speak, true);
+// 主人的私聊不受影响，随时都应
+check('主人私聊仍然恒回', router.decide({ kind: 'private', room: 'private:1000000001', from: '1000000001', text: '嗯' }).speak, true);
 // 每个用例给不同房间号：社交状态是「按房间」记的，同一个房间连着测会互相干扰
 // （@ 我之后那个房间进活跃期，下一条没叫我的也会被接上）。
 check('群里@我', router.decide({ kind: 'group', room: 'g1', from: '42', atMe: true }).speak, true);

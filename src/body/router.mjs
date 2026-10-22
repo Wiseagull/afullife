@@ -53,10 +53,14 @@ export function createRouter({ cfg, now = () => Date.now(), random = Math.random
     if (!msg) return { speak: false, reason: 'not-message' };
 
     if (msg.kind === 'private') {
-      if (cfg.owner.privatePolicy === 'all') return { speak: true, reason: 'private-all' };
-      if (!owners.size) return { speak: false, reason: 'no-owner-configured' };
-      if (!owners.has(String(msg.from))) return { speak: false, reason: 'not-owner' };
-      return { speak: true, reason: 'owner-private' };
+      // 主人的私聊：只要配了号就一直应。
+      if (owners.size && owners.has(String(msg.from))) return { speak: true, reason: 'owner-private' };
+      if (cfg.owner.privatePolicy !== 'all') {
+        return { speak: false, reason: owners.size ? 'not-owner' : 'no-owner-configured' };
+      }
+      // 2026-10-22（主人 m13194）：别人的私聊也按群聊那套走——
+      // 不因为"是私聊"就每句都接，该观望就观望，该冷场就冷场。
+      // 落到下面群聊那段，用同一个房间键算状态。
     }
 
     if (cfg.group?.enabled === false) return { speak: false, reason: 'group-disabled' };
