@@ -109,11 +109,29 @@ export class Sender {
     const bursts = this.splitIntoBursts(toPlain(text));
     const replyTo = opts?.replyTo ? String(opts.replyTo) : '';
     const ids = [];
+    const parts = [];
     let sentFirst = false;
     for (let bi = 0; bi < bursts.length; bi += 1) {
       const chunks = splitMessage(bursts[bi], this.maxLen).filter(Boolean);
       for (let ci = 0; ci < chunks.length; ci += 1) {
         const part = chunks[ci];
+        // 分几条发的时候中间有停顿（按字数算的间隔）。这段停顿里房间可能变——
+        // 他插一句，后面那几条的含义就变了。所以每发下一条之前问一句"还要不要发"。
+        // 第一段不问：调用方在调进来之前已经看过一次了。
+        if (ids.length > 0 && typeof opts.shouldContinue === 'function') {
+          let go = true;
+          try {
+            go = await opts.shouldContinue({ sent: parts.length, part });
+          } catch {
+            go = true; // 判断本身出错就别拦她说话
+          }
+          if (!go) {
+            opts.aborted = true;
+            opts.sentParts = parts.slice();
+            this.logger?.('send', `发到第 ${parts.length} 段，房间变了，剩下的不发了`);
+            return ids;
+          }
+        }
         // 只有当她要引用的那条是第一条：引用段挂在第一句上，后面几句跟着走
         const withReply = replyTo && !sentFirst;
         const message = withReply
@@ -131,6 +149,7 @@ export class Sender {
             throw err;
           }
         }
+        parts.push(part);
         sentFirst = true;
         const lastChunk = ci === chunks.length - 1;
         const last = lastChunk && bi === bursts.length - 1;

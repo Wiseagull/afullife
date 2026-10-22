@@ -4,9 +4,10 @@ import { normalizeEvent } from '../src/body/room.mjs';
 import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
-import { openingMood } from '../src/body/freetime.mjs';
+import { openingMood, draftLines } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
 import { buildPrompt } from '../src/body/prompt.mjs';
+import { selfLines, agoLabel } from '../src/memory/context.mjs';
 import { ROOT } from '../src/config.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -201,6 +202,32 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('我说完他就没影了', openingMood({ lastTs: at(9, 0), lastDir: 'out', lastInTs: at(8, 50), lastInText: '早' }, { now }).quiet, true);
 }
 
+// ── 自由活动说过的话，接话时要摆回她眼前 ────────────────
+// 12:32 那次她明明在背景里看见了自己那句，还是回了「丢给我，我一条条对过去」。
+// 所以现在每句带时间，让「刚刚」这个词提醒她这事刚发生。
+{
+  const room = 'private:7';
+  const now = Date.parse('2026-10-22T12:40:00+08:00');
+  const ev = (agoMs, text, extra = {}) => ({ ts: now - agoMs, room, dir: 'out', text, ...extra });
+  const events = [
+    ev(3 * 3600_000, '早', { free: true }),
+    ev(2 * 3600_000, '午饭吃了', { free: true }),
+    ev(60_000, '评审那批我复跑过了', { free: true }),
+    { ts: now - 30_000, room, dir: 'out', text: '普通回复不该出现在这儿' },
+    { ts: now - 10_000, room: 'private:8', dir: 'out', text: '别的房间', free: true },
+  ];
+  const block = selfLines(events, room, 3, { now });
+  check('自由活动的话补进背景', block.includes('评审那批我复跑过了'), true);
+  check('普通回复不重复列', block.includes('普通回复不该出现在这儿'), false);
+  check('别的房间不串进来', block.includes('别的房间'), false);
+  check('刚说过的话写「刚刚」', block.includes('刚刚你说过'), true);
+  check('两小时前的写清多久', block.includes('2 小时前你说过'), true);
+  check('agoLabel：刚刚', agoLabel(now - 30_000, now), '刚刚');
+  check('agoLabel：分钟', agoLabel(now - 5 * 60_000, now), '5 分钟前');
+  const only = selfLines(events, room, 1, { now });
+  check('limit 只留最近一条', only.includes('2 小时前你说过'), false);
+}
+
 // ── 用量账本 ─────────────────────────────────────────────
 {
   const dir = path.join(ROOT, 'tmp', 'selftest-usage');
@@ -238,6 +265,29 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
     messages: [{ kind: 'private', from: '1', fromName: '先生', text: '在吗' }],
   });
   check('没用量就不写这一段', noUsage.includes('【今天的量】'), false);
+}
+
+// ── 咽回去的那句，下一拍要还给她 ────────────────────────
+{
+  const now = Date.parse('2026-10-22T15:00:00+08:00');
+  const hi = { lastInText: '今天别人下载了我的项目，你也看看？' };
+
+  // 想的时候他开口了
+  const turn = draftLines({ text: '评审那批复跑过了', why: 'turn', at: now - 50_000 }, hi, { now });
+  check('咽回去的句子会带回提示词', turn.includes('评审那批复跑过了'), true);
+  check('说清是多久前的', turn.includes('刚刚'), true);
+  check('带上他那句做对照', turn.includes('今天别人下载了我的项目'), true);
+  check('给她判断权（可发也可丢）', turn.includes('<pass/>'), true);
+  check('放久了就说几分钟前', draftLines({ text: 'x', why: 'turn', at: now - 600_000 }, hi, { now }).includes('10 分钟前'), true);
+
+  // 发到一半被打断：要交代已经发出去的是哪半截
+  const mid = draftLines({ text: '第一句 第二句 第三句', why: 'mid', at: now - 300_000, sentParts: ['第一句'] }, hi, { now });
+  check('半截的要说清发了几段', mid.includes('前 1 段已经发出去了'), true);
+  check('半截的不再提他那句（他已经看过了）', mid.includes('发到一半他开口了'), true);
+
+  // 没有草稿就不写这一段
+  check('没草稿就不提', draftLines(null, hi, { now }), null);
+  check('空句子不算草稿', draftLines({ text: '   ', why: 'turn', at: now }, hi, { now }), null);
 }
 
 // ── 结果 ────────────────────────────────────────────────

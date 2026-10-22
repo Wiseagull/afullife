@@ -122,20 +122,35 @@ export function buildBackground({
  *
  * 只认 `free: true` 标记 —— 普通聊天的回复也是 dir:'out'，
  * 那些会话自己记着，再列一遍就是重复。
+ *
+ * 12:32 那次它确实看见了这一块，却还是回「丢给我嘛，我一条条对过去」——
+ * 光写「你发过」不够，读起来像很久以前的事。所以每句带上「刚刚 / 几分钟前」，
+ * 让"这句是我二十秒前说的"变成一眼能看见的事实。
  */
-export function selfLines(events = [], roomKey = null, limit = 3) {
+export function selfLines(events = [], roomKey = null, limit = 3, { now = Date.now() } = {}) {
   const mine = events
     .filter((e) => e.room === roomKey && e.dir === 'out' && e.free === true)
     .filter(worthwhile)
     .slice(-limit);
   if (!mine.length) return '';
   return [
-    '（你自己主动说过的话，别当成没说）',
+    '（你自己主动说过的话——不是他说的，也不是你打算做的；别当成没说，也别再问一遍）',
     ...mine.map((e) => {
       const said = String(e.text || '').replace(/\s+/g, ' ').trim();
-      return `- 你发过：${said.length > 60 ? `${said.slice(0, 60)}…` : said}`;
+      const line = said.length > 60 ? `${said.slice(0, 60)}…` : said;
+      return `- ${agoLabel(e.ts, now)}你说过：${line}`;
     }),
   ].join('\n');
+}
+
+/** 事件离现在多久，说人话。 */
+export function agoLabel(ts, now = Date.now()) {
+  const d = Number(now) - Number(ts || 0);
+  if (!Number.isFinite(d) || d < 0) return '';
+  if (d < 90_000) return '刚刚';
+  if (d < 3600_000) return `${Math.max(1, Math.round(d / 60_000))} 分钟前`;
+  if (d < 86400_000) return `${Math.round(d / 3600_000)} 小时前`;
+  return `${Math.round(d / 86400_000)} 天前`;
 }
 
 /**

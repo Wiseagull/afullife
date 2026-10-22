@@ -115,12 +115,14 @@ const pending = new PendingStore({ file: path.join(cfg.dataDir, 'memory', 'pendi
 function freeRoomKey() {
   return cfg.freeTime?.room || `private:${cfg.owner.userIds[0] ?? 'owner'}`;
 }
-async function freeSay(text) {
+async function freeSay(text, opts = {}) {
   const room = freeRoomKey();
   const qq = String(room).replace(/^private:/, '').replace(/^group:/, '');
   const ids = String(room).startsWith('group:')
-    ? await sender.sendGroup(qq, text)
-    : await sender.sendPrivate(qq, text);
+    ? await sender.sendGroup(qq, text, opts)
+    : await sender.sendPrivate(qq, text, opts);
+  // 发到一半被他打断的话，账上只记真正发出去的那几段，别把没发的也写进去。
+  const actual = opts?.aborted ? (opts.sentParts || []).join(' ') : text;
   // free: true —— 这句是自由活动里她自己主动说的，不走房间会话。
   // 装配背景时要按这个标记补给她，否则她下次就真当没说过。
   events.append({
@@ -129,10 +131,10 @@ async function freeSay(text) {
     kind: String(room).startsWith('group:') ? 'group' : 'private',
     id: qq,
     msgId: ids?.[0] ?? null,
-    text,
+    text: actual || text,
     free: true,
   });
-  L('out', `${room} → ${text.slice(0, 60)}`);
+  L('out', `${room} → ${(actual || text).slice(0, 60)}`);
 }
 // 她的兴趣账本：只记"做过没有、上次什么感觉"，意愿本身写在 persona/self.md 里。
 // 开机先同步一次 self.md——她在那儿新写一条，这边就自动认领。

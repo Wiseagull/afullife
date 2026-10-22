@@ -25,6 +25,40 @@ function fmtMs(ms) {
   return `${m} 分钟`;
 }
 
+/** 事件离现在多久，说人话。 */
+function ago(ms) {
+  const d = Math.max(0, Number(ms) || 0);
+  if (d < 90_000) return '刚刚';
+  if (d < 3600_000) return `${Math.max(1, Math.round(d / 60_000))} 分钟前`;
+  return `${Math.round(d / 3600_000)} 小时前`;
+}
+
+// 咽回去的那句，下一拍要不要还给她。
+//
+// 光"咽回去"不够：那句话是花了几十秒想出来的，扔掉等于白想一次；
+// 而且人被打断之后是会把话接回来的，不是忘掉重来。
+// 所以存成草稿，下一拍开头摆给她，让她自己判断还发不发。
+//
+// 返回 null 表示这拍不用提草稿。
+export function draftLines(draft, roomState = null, { now = Date.now() } = {}) {
+  if (!draft || !draft.text) return null;
+  const left = String(draft.text).replace(/\s+/g, ' ').trim();
+  if (!left) return null;
+  const when = ago(now - Number(draft.at || now));
+  const his = String(roomState?.lastInText || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  const sentPart = Array.isArray(draft.sentParts) && draft.sentParts.length
+    ? `（前 ${draft.sentParts.length} 段已经发出去了：「${String(draft.sentParts[draft.sentParts.length - 1]).slice(0, 30)}」）`
+    : '';
+  return [
+    `【你${when}有一句没说完】`,
+    `你想说：「${left.length > 160 ? `${left.slice(0, 160)}…` : left}」${sentPart}`,
+    draft.why === 'mid'
+      ? '发到一半他开口了，后面那些被你咽回去了。'
+      : `但就在你想着的时候他开口了${his ? `（他最后一句：「${his}」）` : ''}，那句是按他说话之前的状态想的，被你咽回去了。`,
+    '现在这个才是最新的状态。还发不发？发就照原样、或者改成现在该说的样子说出来；不值得说了就回 <pass/>，这句就丢掉。',
+  ].filter(Boolean).join('\n');
+}
+
 // 开场那句要不要硬开口。
 //
 // 06:31 那次：他 05:39 说了晚安去睡，我六点半醒来，协议要我"先主动说一句"，
@@ -81,6 +115,7 @@ export class FreeTime {
   #reason = '';
   #interests = null;
   #drafts = null;      // 攒着的「也许想记下来的」
+  #draft = null;       // 被咽回去的那句，下一拍还给她（不是丢掉）
   #reviewed = false;   // 这一段有没有回顾过
   #openingQuiet = false; // 开场这一句是不是"没人也应"的，允许不回
 
@@ -136,6 +171,7 @@ export class FreeTime {
     this.#reviewed = false;
     this.#openTries = 0;
     this.#last = '';
+    this.#draft = null;
     this.#sid = null;
     this.#reason = '';
     this.#log('free', `自由活动开始：${Math.round(dur / 60000)} 分钟，权限=${f.permission || 'look'}，最多说 ${f.maxMessages ?? 3} 句`);
@@ -255,9 +291,16 @@ export class FreeTime {
       this.#log('free', '这一段要收尾了，留一拍做回顾');
     }
 
+    // 上一拍被咽回去的那句，摆到这一拍开头。递一次就清掉——
+    // 她这回回 <pass/> 就是"这句不要了"，不该下一拍再问一遍。
+    const draftBlock = draftLines(this.#draft, this.#roomState ? this.#roomState() : null);
+    if (draftBlock) {
+      this.#log('free', '上一拍咽回去的那句，这拍还给她了');
+      this.#draft = null;
+    }
+
     const prompt = [
-      '【自由活动】',
-      `现在是 ${hhmm}，这一段还剩 ${fmtMs(left)}。`,
+      '【自由活动】',      `现在是 ${hhmm}，这一段还剩 ${fmtMs(left)}。`,
       `权限：${perm}`,
       said || null,
       opening
@@ -267,6 +310,7 @@ export class FreeTime {
         : null,
       quota > 0 ? `这段时间你还能主动说 ${quota} 句话。` : '这一段时间的话已经说完了，剩下的时间只能自己待着，不能再发消息。',
       this.#last ? `你上一拍：${this.#last}` : null,
+      draftBlock,
       '',
       opening
         ? (quiet ? '想做点什么就做，不想做就安静待着。' : '想做点什么就做，不想做也可以。先把那句话说完。')
@@ -283,6 +327,7 @@ export class FreeTime {
     ].filter(Boolean).join('\n');
 
     const t0 = Date.now();
+    const beatStart = t0;
     const r = await this.#brain.run({ prompt, sessionId: this.#sid });
     try { this.#onUsage?.(this.#room, r, 'free'); } catch { /* 记账失败不影响她说话 */ }
     if (!this.#running) return;
@@ -290,6 +335,21 @@ export class FreeTime {
     const text = String(r?.text ?? '').trim();
     this.#beats += 1;
     this.#log('free', `第 ${this.#beats} 拍 ${Date.now() - t0}ms：${text.slice(0, 60).replace(/\s+/g, ' ')}`);
+
+    // 这一拍想得久，他中途已经开口了：这句话是按开口前的状态想的，不当场发。
+    //
+    // 12:31:48 那次就是这么撞上的：这一拍从 12:30:16 想了一分半，中间他 12:30:42
+    // 说了「今天别人下载了我的项目…」，我 12:31:48 还在说「评审那批复跑过了」，
+    // 桥隔了 21 秒又回一句「丢给我嘛，我一条条对过去」——两个声音，两份状态。
+    // 发之前再看一眼房间：他在这拍开始之后说过话，就把这句咽回去。
+    // 不是丢掉——存成草稿，下一拍开头摆回她眼前，让她自己决定还发不发。
+    if (!/^(<pass\s*\/?>|pass|<wait:\s*\d+\s*\/?>|<done\s*\/?>)$/i.test(text) && this.#himSpokeSince(beatStart)) {
+      this.#draft = { text, why: 'turn', at: Date.now(), sentParts: [] };
+      this.#last = '他刚好在这一拍里开口了，这句按旧状态想的，咽回去了（下拍看还发不发）。';
+      this.#log('free', '这一拍里他说话了，这句不发，存成草稿下拍再看');
+      this.#schedule(this.#beatMs());
+      return;
+    }
 
     // 结束
     if (/<done\s*\/?>/i.test(text)) {
@@ -337,8 +397,17 @@ export class FreeTime {
       return;
     }
 
-    const sent = await this.#say(text, { free: opening && !this.#openingQuiet });
-    this.#last = sent ? `她跟他说：「${text.slice(0, 50)}」` : '她说了句，但没发出去。';
+    const sent = await this.#say(text, {
+      free: opening && !this.#openingQuiet,
+      // 分几条发的时候，中间那几秒里他可能插话——每发下一条之前再问一次。
+      guard: () => !this.#himSpokeSince(beatStart),
+    });
+    if (sent?.aborted) {
+      this.#last = '发到一半他开口了，剩下的几句没发（下拍看还接不接）。';
+      this.#log('free', `发到第 ${sent.sentParts.length} 段他开口了，后面咽回去`);
+    } else {
+      this.#last = sent ? `她跟他说：「${text.slice(0, 50)}」` : '她说了句，但没发出去。';
+    }
     if (sent && opening) {
       this.#opening = false;
       this.#openTries = 0;
@@ -352,14 +421,38 @@ export class FreeTime {
     return Math.max(15000, Number(f.beatMs ?? 75000));
   }
 
-  async #say(text, { free = false } = {}) {
+  /** 从 ts 到现在，他有没有在这个房间里开过口。 */
+  #himSpokeSince(ts) {
+    if (!this.#roomState) return false;
     try {
-      await this.#send(text);
+      const st = this.#roomState() || {};
+      return st.lastDir === 'in' && Number(st.lastTs || 0) > Number(ts || 0);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 说一句。
+   *
+   * guard：分条发送时，每条之间再确认一次"还要不要发"。返回 false 就停，
+   * 已经发出去的那几段会留在返回值里（sentParts），剩下的存成草稿。
+   */
+  async #say(text, { free = false, guard = null } = {}) {
+    const opts = {};
+    if (guard) opts.shouldContinue = guard;
+    try {
+      await this.#send(text, opts);
+      if (opts.aborted) {
+        if (!free) this.#messages += 1; // 说出去了半句，也算说过
+        this.#draft = { text, why: 'mid', at: Date.now(), sentParts: opts.sentParts || [] };
+        return { aborted: true, sentParts: opts.sentParts || [] };
+      }
       if (!free) this.#messages += 1;
-      return true;
+      return { aborted: false, sentParts: [text] };
     } catch (e) {
       this.#log('free', `发不出去：${e?.message ?? e}`);
-      return false;
+      return null;
     }
   }
 }
