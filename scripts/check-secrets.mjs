@@ -82,6 +82,7 @@ for (const file of files) {
     }
   }
   for (const p of IDENTITY) {
+// eslint-disable-next-line no-control-regex
     if (p.noisy && !/(?:\d{9,11})/.test(text)) continue; // 长数字才像号码，短的太多噪音
     for (const m of text.matchAll(p.re)) {
       // 形如 123456789 / 1000000001 这种一眼假的号码放过（真号码不会这么整齐）

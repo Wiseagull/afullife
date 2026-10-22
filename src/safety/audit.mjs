@@ -3,7 +3,7 @@
 
 const SECRET_RULES = [
   { re: /sk-[A-Za-z0-9_-]{16,}/g, to: 'sk-***' },
-  { re: /Bearer\s+[A-Za-z0-9._\-]{12,}/gi, to: 'Bearer ***' },
+  { re: /Bearer\s+[A-Za-z0-9._-]{12,}/gi, to: 'Bearer ***' },
   { re: /DEEPSEEK_API_KEY\s*=\s*\S+/gi, to: 'DEEPSEEK_API_KEY=***' },
   { re: /\b[A-Za-z0-9_-]{40,}\b/g, to: '***' }, // 长串一律当令牌（QQ 的 43 位令牌就在这拦）
 ];

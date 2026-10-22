@@ -2,6 +2,8 @@ window.__ModuleLoader__.load({
   id: 'afullife-panel',
   factory: (require) => {
     var module = { exports: {} };
+    // 这段是 DSH 的模块包装协议要的样子，exports 由 loader 消费
+    // eslint-disable-next-line no-unused-vars
     var exports = module.exports;
     const React = require('react');
     const h = React.createElement;
@@ -949,7 +951,14 @@ window.__ModuleLoader__.load({
               try {
                 const r = await api('/api/restart', { method: 'POST' });
                 alert('桥已重启（pid ' + (r && r.pid) + '，' + (r && r.ms) + 'ms）');
-                await loadStatus();
+                // 重启完成后重新拉一次配置。
+                // 2026-10-22：这里原本写的是 await loadStatus()，可根本没有这个函数——
+                // 于是重启明明成功了，面板却弹「重启失败：loadStatus is not defined」。
+                try {
+                  const again = await api('/api/config');
+                  setCfg(again.config);
+                  setErr('');
+                } catch (e2) { setErr(e2.message); }
               } catch (e) {
                 alert('重启失败：' + (e && e.message ? e.message : e));
               } finally {

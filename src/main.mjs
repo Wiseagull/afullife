@@ -25,7 +25,7 @@ import { InterestStore } from './interests/store.mjs';
 import { distill } from './memory/distill.mjs';
 import { upkeep, upkeepStickers } from './memory/upkeep.mjs';
 import { screenStickers } from './stickers/screen.mjs';
-import { toPlain } from './util/text.mjs';
+import { toPlain , oneLine } from './util/text.mjs';
 import { createRouter } from './body/router.mjs';
 import { Debounce } from './body/debounce.mjs';
 import { FreeTime } from './body/freetime.mjs';
@@ -175,7 +175,7 @@ const freeTime = new FreeTime({
   drafts: (n = 3) => selfDrafts.render(n),
 });
 // 没人叫的时候，她自己隔一阵掷一次骰子，掷到了就在你不在电脑前时醒一段
-const autoFree = startAutoFree({ cfg, freeTime, logger: { info: L }, queue });
+const _autoFree = startAutoFree({ cfg, freeTime, logger: { info: L }, queue });
 
 // 闸的白名单：默认就是"项目里 + 她自己的地方"，不写死任何人的硬盘路径
 {

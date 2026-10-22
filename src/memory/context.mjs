@@ -8,12 +8,6 @@
 //
 // 跨房间可见性仍在这里收口：用 cfg.memory.rooms 的两个开关。
 
-function hhmm(ts) {
-  const d = new Date(ts);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
 /** 房间的短标签，用来标“这话是从哪儿来的” */
 export function roomTag(room, nameOf = null) {
   if (!room) return '';

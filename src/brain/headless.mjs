@@ -49,6 +49,7 @@ const DEFAULTS = {
   permissionMode: 'danger-full-access',
 };
 
+// eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-9;]*m/g;
 
 /** 连子进程一起杀：Windows 下  只杀爹。 */

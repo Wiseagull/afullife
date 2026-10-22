@@ -7,12 +7,38 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    name: node ${{ matrix.node }}
+  # ---------------------------------------------------------------
+  # 1) lint：抓「用了不存在的变量」「a || a」这类低级错
+  #    起因：2026-10-22 外部评审在别的电脑上抓到 finishTurn 里用了不在作用域的 msgs
+  #    （让「引用回复」整条链路失效）与 userIds[0] || userIds[0]。
+  #    no-undef 与 no-constant-binary-expression 都能直接抓住。
+  # ---------------------------------------------------------------
+  lint:
+    name: lint（eslint）
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: 装开发依赖（只有 eslint 与 globals，运行时仍是零依赖）
+        run: npm ci --no-audit --no-fund
+      - name: eslint
+        run: npm run lint
+
+  # ---------------------------------------------------------------
+  # 2) 语法与四套自检 —— 在 Linux 与 Windows 上各跑一遍
+  #    项目是 Windows 侧的工具（taskkill、junction、盘符正则），
+  #    只在 ubuntu 上绿说明不了能跑。
+  # ---------------------------------------------------------------
+  test:
+    name: test / ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         node: ['22', '24']
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +49,7 @@ jobs:
 
       # 不用 npm install：这个项目没有第三方运行时依赖
       - name: 语法检查
+        shell: bash
         run: |
           find src scripts plugin -name '*.mjs' -o -name '*.js' | while read f; do
             node --check "$f" || exit 1
@@ -40,5 +67,9 @@ jobs:
       - name: 待确认（先问后改）
         run: node scripts/probe-conflict.mjs
 
+      - name: 规程按需挂（闲聊精简 / 派活全套）
+        run: node scripts/probe-rules.mjs
+
       - name: 发布前扫一遍密钥与个人标识（只报告，不让 CI 红）
+        shell: bash
         run: node scripts/check-secrets.mjs || true

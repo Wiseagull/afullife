@@ -7,9 +7,6 @@
 // 权限边界（主人定的）：
 //   事实 / 待办 —— 可以自己 stale（压下去，不删）、update、merge。
 //   约定 / 偏好 —— 只能报 conflict，绝不自己改。
-import fs from 'node:fs';
-import path from 'node:path';
-
 const INSTRUCTIONS = `你在体检一份长期记忆清单。不要闲聊，不要解释，只输出一个 JSON 数组。
 
 你要找的是「记坏了的地方」：

@@ -9,7 +9,6 @@
 //
 // 挑的顺序不是随机：越久没碰、做得越少的排前面；self.md 里排在前面的权重高一点。
 import fs from 'node:fs';
-import path from 'node:path';
 import { ROOT, loadConfig, interestFile, personaFile } from '../src/config.mjs';
 import { InterestStore } from '../src/interests/store.mjs';
 

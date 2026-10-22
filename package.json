@@ -17,7 +17,9 @@
     "install:panel": "node scripts/install-panel.mjs",
     "update": "node scripts/update.mjs",
     "update:check": "node scripts/update.mjs --check",
-    "probe:rules": "node scripts/probe-rules.mjs"
+    "probe:rules": "node scripts/probe-rules.mjs",
+    "lint": "eslint .",
+    "probe:conflict": "node scripts/probe-conflict.mjs"
   },
   "license": "GPL-3.0-or-later",
   "keywords": [
@@ -36,5 +38,9 @@
     "url": "https://github.com/Wiseagull/afullife/issues"
   },
   "homepage": "https://github.com/Wiseagull/afullife#readme",
-  "author": "Wiseagull·Deriouze"
+  "author": "Wiseagull·Deriouze",
+  "devDependencies": {
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0"
+  }
 }

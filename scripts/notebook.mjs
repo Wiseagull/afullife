@@ -50,7 +50,7 @@ const flags = Object.fromEntries(
     return [k, v ?? true];
   }),
 );
-const words = args.slice(1).filter((a) => !a.startsWith('--')).join(' ').trim();
+let words = args.slice(1).filter((a) => !a.startsWith('--')).join(' ').trim();
 
 fs.mkdirSync(path.join(DIR, 'notes'), { recursive: true });
 fs.mkdirSync(path.join(DIR, 'memories'), { recursive: true });
