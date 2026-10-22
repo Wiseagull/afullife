@@ -124,3 +124,21 @@ export function classify(tool, input = {}) {
 
   return verdict('note', 'other', `调了 ${tool}`, '');
 }
+
+/**
+ * 这一条 read_image 能不能放行？
+ *
+ * 只认「这一批消息里别人刚发过来的那几张图」的确切路径。
+ * 其他工具、其他路径一律不放——别人让她读本机任意文件，是另一回事。
+ *
+ * @param {string} tool 工具名
+ * @param {object} input 工具参数
+ * @param {Set<string>} allowed 允许读的绝对路径（已经 resolve 过的）
+ * @returns {boolean}
+ */
+export function allowImageRead(tool, input = {}, allowed = new Set()) {
+  if (tool !== 'read_image') return false;
+  const want = String(input?.file_path ?? input?.path ?? '');
+  if (!want) return false;
+  return allowed.has(path.resolve(want));
+}

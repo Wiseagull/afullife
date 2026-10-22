@@ -15,7 +15,7 @@ import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
 import { buildPrompt, buildFollowup, NOPOWER_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
-import { setWorkspaceRoots, underWorkspace } from './safety/rules.mjs';
+import { setWorkspaceRoots, underWorkspace, allowImageRead } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
 import { NotesStore } from './memory/notes.mjs';
@@ -403,12 +403,23 @@ function makeOnEvent(room) {
 }
 
 /** 这话不是特权号说的 → 一个工具都不许用，连问都不问他。
- *  理由：别人（群里任何人）让她干活，一律推掉；要动手只能由特权号开口。 */
-function makeDenyAllOnEvent(room) {
+ *  理由：别人（群里任何人）让她干活，一律推掉；要动手只能由特权号开口。
+ *
+ *  只有一个例外：**读这一批里别人刚发过来的那几张图**。
+ *  2026-10-22 晚上她在群里一直说「打不开」，查下来是这条闸把 read_image 一起拦了——
+ *  群里没人是他，她连看一眼图的权限都没有，等于瞎。
+ *  但也不能干脆放开 read_image（那就等于谁都能让她去读本机任意文件），
+ *  所以只认这一批消息里那几张图的确切路径。 */
+function makeDenyAllOnEvent(room, allowedReadPaths = new Set()) {
   return (ev) => {
     if (ev?.type !== 'tool_call') return;
     auditRoom = room;
     const v = classify(ev.tool, ev.input);
+    if (allowImageRead(ev.tool, ev.input, allowedReadPaths)) {
+      gate.onAudit?.({ tool: ev.tool, input: ev.input, verdict: { ...v, level: 'note', ruleId: 'non-owner-image' } });
+      L('gate', '(不是特权号) 放行 read_image：这是他刚发的那张图');
+      return;
+    }
     gate.onAudit?.({ tool: ev.tool, input: ev.input, verdict: { ...v, level: 'block', ruleId: 'non-owner' } });
     L('gate', `(不是特权号) 拒绝 ${ev.tool} ${v.ruleId}`);
     return 'abort';
@@ -811,10 +822,18 @@ async function handleBatch(roomKey, msgs) {
   // 就变成了"主人授权"。现在混批一律收手——他要动手，单独发一条就行。
   const trusted = msgs.length > 0 && msgs.every((m) => isRoot(m.from));
   const fromOwner = isRoot(last.from);
-  const onEvent = trusted ? makeAuditOnEvent(roomKey) : makeDenyAllOnEvent(roomKey);
+  // 这一批里别人发的图：就算不许动手，也得让她看一眼，不然群里她永远"打不开"
+  const batchImages = new Set(
+    msgs.flatMap((m) => (Array.isArray(m.imageFiles) ? m.imageFiles : []))
+      .filter(Boolean)
+      .map((f) => path.resolve(f)),
+  );
+  const onEvent = trusted
+    ? makeAuditOnEvent(roomKey)
+    : makeDenyAllOnEvent(roomKey, batchImages);
   if (trusted) L('gate', `特权直通：${roomKey}（${msgs.length} 条），只记账不拦`);
   else if (fromOwner) L('gate', `这一批里混了别人的话：${roomKey} 这一轮只能用嘴`);
-  else L('gate', `没有特权号：${roomKey} 这一轮只能用嘴`);
+  else L('gate', `没有特权号：${roomKey} 这一轮只能用嘴${batchImages.size ? `（图还能看：${batchImages.size} 张）` : ''}`);
 
   let result = null;
   // 真干起来要时间（尤其她翻文件、画图的时候），先给一句话，别让人干等着。

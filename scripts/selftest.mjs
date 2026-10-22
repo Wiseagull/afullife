@@ -443,6 +443,18 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('正文为空也能拼', withFiles('', ['a.jpg']), '（附图：a.jpg）');
 }
 
+// ── 群里别人发的图：闸放行 read_image，但只放行那几张 ──────────
+// 2026-10-22 晚上她在群里一直说「打不开」：不是没路径，是闸把 read_image 也拦了。
+{
+  const { allowImageRead } = await import('../src/safety/rules.mjs');
+  const allowed = new Set([String.raw`E:\img\a.jpg`]);
+  ok('别人发的图可以看', allowImageRead('read_image', { file_path: String.raw`E:\img\a.jpg` }, allowed));
+  ok('换成正斜杠也认得', allowImageRead('read_image', { file_path: 'E:/img/a.jpg' }, allowed));
+  ok('别的路径不给看', !allowImageRead('read_image', { file_path: String.raw`E:\secret\x.jpg` }, allowed));
+  ok('别的工具一样不给', !allowImageRead('pwsh', { command: 'dir' }, allowed));
+  ok('没给路径就当不给', !allowImageRead('read_image', {}, allowed));
+}
+
 // ── 结果 ────────────────────────────────────────────────
 if (fails.length) {
   console.log(`✗ ${fails.length} 个失败 / ${pass} 个通过\n`);
