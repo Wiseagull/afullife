@@ -8,12 +8,27 @@
 // 分类靠"当时的上下文"而不是看图：她还看不了图，但知道这图是谁在什么场合发的。
 //
 // 路径一律存**相对项目根**的相对路径 —— 这个项目要打包给别人，写死 C:\ 或 E:\ 就废了。
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
 const EXT_OK = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 
 const toRel = (root, p) => path.relative(root, p).split(path.sep).join('/');
+
+/**
+ * 内容指纹（取 sha256 前 16 位就够，撞了也不过分——真要撞的是一张图）。
+ * 为什么不用「来源名 + 大小」当重复判据：QQ 转发同一个表情会换文件名，
+ * 名字和大小都可能变，只有内容不变。2026-10-22 实测库里 6 组重复（k0328=k0008、
+ * k0330=k0337…）全是**字节完全一样**、只有 originName 不同 —— 老判据一个都没拦住。
+ */
+const fingerprint = (file) => {
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 16);
+  } catch {
+    return null; // 读不动就当没指纹，退回去用原来的判据
+  }
+};
 
 /**
  * 看文件头猜真身。QQ 下来的图统统叫 `.png`，里头可能是 jpg 也可能是 gif；
@@ -72,7 +87,7 @@ export class StickerLibrary {
     return it ? { ...it, abs: this.abs(it) } : null;
   }
 
-  /** 收一张图进库。已经在库里（同来源同名同大小）就不重复收。 */
+  /** 收一张图进库。已经在库里（同名同大小，或内容指纹一样）就不重复收。 */
   add({ src, tags = [], when = '', ctx = '', from = '', room = null, pending = false }) {
     const ext = path.extname(src).toLowerCase();
     if (!EXT_OK.has(ext)) throw new Error(`不是图片：${ext || '(没有扩展名)'}`);
@@ -84,6 +99,25 @@ export class StickerLibrary {
 
     const dup = this.#data.items.find((i) => i.originName === originName && i.bytes === size);
     if (dup) return { item: this.get(dup.id), dup: true };
+
+    // 内容一样的也算重复 —— 这是真正拦住「群里同一张图刷十遍」的那道闸。
+    // 老条目没有 hash，碰上就算一次顺手补上（存回盘里，下次不用再算）。
+    const hash = fingerprint(src);
+    let backfilled = false;
+    const sameHash = hash
+      ? this.#data.items.find((i) => {
+        if (i.hash) return i.hash === hash;
+        const h = fingerprint(this.abs(i));
+        if (!h) return false;
+        i.hash = h;
+        backfilled = true;
+        return h === hash;
+      })
+      : null;
+    if (sameHash) {
+      if (backfilled) this.#save();
+      return { item: this.get(sameHash.id), dup: true };
+    }
 
     // 编号别撞上盘上已有的文件：撞了 copyFileSync 会把旧图直接盖掉，图上就真丢了。
     // （2026-10-21 实测发现：桥和 CLI 各拿一份内存，seq 会退回去。）
@@ -106,6 +140,7 @@ export class StickerLibrary {
       from: String(from || '').trim(),
       room,
       originName,
+      hash,
       addedAt: Date.now(),
       usedAt: null,
       used: 0,

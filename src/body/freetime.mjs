@@ -25,6 +25,38 @@ function fmtMs(ms) {
   return `${m} 分钟`;
 }
 
+// 开场那句要不要硬开口。
+//
+// 06:31 那次：他 05:39 说了晚安去睡，我六点半醒来，协议要我"先主动说一句"，
+// 于是"天亮得比昨天早一点"就落在一间睡着的房间里。那句话本身没写错，规则错了。
+// 所以现在先看房间：没人、或者他刚说了晚安、或者隔了太久，就允许安静地待着。
+export function openingMood(state = {}, {
+  now = Date.now(),
+  quietAfterMs = 2 * 3600_000,
+  recentMs = 30 * 60_000,
+  nightFrom = 23,
+  nightTo = 7,
+} = {}) {
+  const lastTs = Number(state.lastTs) || 0;
+  const lastDir = String(state.lastDir || '');
+  const lastInTs = Number(state.lastInTs) || 0;
+  const lastInText = String(state.lastInText || '');
+
+  if (/晚安|睡了|睡啦|先睡|去睡|好梦/.test(lastInText.slice(-20))) {
+    return { quiet: true, why: `他最后说的是「${lastInText.slice(0, 14)}」` };
+  }
+  if (lastDir === 'in' && lastTs && now - lastTs < recentMs) {
+    return { quiet: false, why: '他刚说过话' };
+  }
+  if (!lastInTs) return { quiet: true, why: '这个房间里还没人说过话' };
+  const gap = now - lastInTs;
+  if (gap >= quietAfterMs) return { quiet: true, why: `他 ${Math.round(gap / 60000)} 分钟没出声了` };
+  const h = new Date(now).getHours();
+  const night = nightFrom > nightTo ? (h >= nightFrom || h < nightTo) : (h >= nightFrom && h < nightTo);
+  if (night) return { quiet: true, why: '这会儿是夜里' };
+  return { quiet: false, why: '' };
+}
+
 export class FreeTime {
   #cfg;
   #brain;
@@ -43,13 +75,15 @@ export class FreeTime {
   #last = '';
   #sid = null;
   #recent = null;
+  #roomState = null;
   #room;
   #reason = '';
   #interests = null;
   #drafts = null;      // 攒着的「也许想记下来的」
   #reviewed = false;   // 这一段有没有回顾过
+  #openingQuiet = false; // 开场这一句是不是"没人也应"的，允许不回
 
-  constructor({ cfg, brain, send, logger, queue, room, recent, interests, drafts }) {
+  constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts }) {
     this.#cfg = cfg;
     this.#brain = brain;
     this.#send = send;
@@ -58,6 +92,8 @@ export class FreeTime {
     this.#room = room || 'private';
     // 上一段/这一段时间里她自己说过的话，喂一拍开头，免得一段一段重复同一句
     this.#recent = recent || null;
+    // 这个房间最后一条是谁说的、隔了多久——决定开场要不要硬开口
+    this.#roomState = roomState || null;
     // 她自己的兴趣清单（可以不做，但至少知道自己想做什么）
     this.#interests = interests || null;
     // 草稿箱：这段快结束时递给她，看她想不想写进自己那份
@@ -94,6 +130,7 @@ export class FreeTime {
     this.#beats = 0;
     this.#messages = 0;
     this.#opening = true;
+    this.#openingQuiet = false;
     this.#reviewed = false;
     this.#openTries = 0;
     this.#last = '';
@@ -146,6 +183,26 @@ export class FreeTime {
 
   async #beat() {
     if (!this.#running) return;
+
+    // 他正在说话：这一拍让路。
+    //
+    // 起因是主人 2026-10-22 问的「你在跟我聊的时候，自由活动要不要先闭嘴」——
+    // 她当时只做了"空房间别硬开口"那一半，这一半反着来：只要他刚在这个房间说过话，
+    // 这一拍就不动脑子、不占额度、也不出声，等他安静下来再说。
+    // 配成 0 就关掉这个让路逻辑。
+    const activeMs = Number((this.#cfg.freeTime || {}).skipIfActiveMs ?? 300_000);
+    if (activeMs > 0 && this.#roomState) {
+      let st = {};
+      try { st = this.#roomState() || {}; } catch { st = {}; }
+      const lastTs = Number(st.lastTs) || 0;
+      if (st.lastDir === 'in' && lastTs && Date.now() - lastTs < activeMs) {
+        this.#last = '他还在说话，这一拍她让开了。';
+        this.#log('free', `他 ${Math.round((Date.now() - lastTs) / 1000)} 秒前还在说话，这一拍让路`);
+        this.#schedule(this.#beatMs());
+        return;
+      }
+    }
+
     const f = this.#cfg.freeTime || {};
     const perm = PERM[f.permission] || PERM.look;
     const maxMsg = Number(f.maxMessages ?? 3);
@@ -159,6 +216,16 @@ export class FreeTime {
     const said = (() => {
       try { return String(this.#recent?.() || '').trim(); } catch { return ''; }
     })();
+
+    // 房间里有没有人应：没人就不硬开这个口
+    let quiet = null;
+    if (opening && this.#roomState) {
+      let st = {};
+      try { st = this.#roomState() || {}; } catch { st = {}; }
+      const mood = openingMood(st, { now: now.getTime() });
+      if (mood.quiet) quiet = mood;
+    }
+    this.#openingQuiet = !!quiet;
 
     // 今天可以干的三件事：按"多久没做 + 做过几次 + self.md 里的轻重"挑，不随机抽
     let interestLines = null;
@@ -192,13 +259,15 @@ export class FreeTime {
       `权限：${perm}`,
       said || null,
       opening
-        ? '这一段刚开始。先主动跟他说一句话——不用等他说什么，随便一句真的想说的就行（这会儿在做什么、想到什么、或者单纯打个招呼）。这一句不算在额度里。'
+        ? (quiet
+          ? `这一段刚开始，不过房间里这会儿没人：${quiet.why}。开场不用硬开——没人应的时候，一句问候也只是落在空房间里。想说话就说，不想就 <pass/>，安静地待着也算这一拍。`
+          : '这一段刚开始。先主动跟他说一句话——不用等他说什么，随便一句真的想说的就行（这会儿在做什么、想到什么、或者单纯打个招呼）。这一句不算在额度里。')
         : null,
       quota > 0 ? `这段时间你还能主动说 ${quota} 句话。` : '这一段时间的话已经说完了，剩下的时间只能自己待着，不能再发消息。',
       this.#last ? `你上一拍：${this.#last}` : null,
       '',
       opening
-        ? '想做点什么就做，不想做也可以。先把那句话说完。'
+        ? (quiet ? '想做点什么就做，不想做就安静待着。' : '想做点什么就做，不想做也可以。先把那句话说完。')
         : '你可以做点自己想做的事：看看他在干什么、翻翻文件、上网看点东西、或者什么都没必要做。',
       opening ? null : '别为了动而动。真没什么想干的，就安安静静待着一拍。',
       opening ? null : interestLines,
@@ -239,6 +308,14 @@ export class FreeTime {
 
     // 沉默
     if (/^<pass\s*\/?>$|^pass$/i.test(text) || !text) {
+      if (opening && this.#openingQuiet) {
+        // 房间里没人：不硬开这个口，也不再要一次
+        this.#opening = false;
+        this.#last = '房间里没人，她没开口，安静地待着。';
+        this.#log('free', `开场没硬开（${quiet?.why || ''}）`);
+        this.#schedule(this.#beatMs());
+        return;
+      }
       if (opening) {
         // 开场这一句必须发，跳过就再要一次，最多两次
         this.#openTries += 1;
@@ -257,7 +334,7 @@ export class FreeTime {
       return;
     }
 
-    const sent = await this.#say(text, { free: opening });
+    const sent = await this.#say(text, { free: opening && !this.#openingQuiet });
     this.#last = sent ? `她跟他说：「${text.slice(0, 50)}」` : '她说了句，但没发出去。';
     if (sent && opening) {
       this.#opening = false;

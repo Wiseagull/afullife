@@ -806,6 +806,9 @@ window.__ModuleLoader__.load({
             h('span', { style: S.hint }, '秒')),
           h(Row, { label: '最多说几句' },
             h(Num, { value: Number(f.maxMessages) || 3, step: 1, onChange: (v) => setIn('freeTime.maxMessages', Math.max(0, Number(v))) })),
+          h(Row, { label: '你刚说过话就让路' },
+            h(Num, { value: Math.round((Number(f.skipIfActiveMs ?? 300000)) / 60000), step: 1, onChange: (v) => setIn('freeTime.skipIfActiveMs', Math.max(0, Number(v)) * 60000) }),
+            h('span', { style: S.hint }, '分钟内不打扰，0 = 不让路')),
           h(Row, { label: '能看到什么程度' },
             h('select', {
               style: S.area,

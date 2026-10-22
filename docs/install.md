@@ -205,6 +205,39 @@ node scripts/install-panel.mjs --uninstall    # 卸掉（项目文件不动）
 注意：装完不用重启 DSH，但**新开的一轮会话**才拿得到新工具；`bsk_*`（浏览器那套）
 只对装好之后**新建**的会话生效。
 
+### 给 `dsh-image-gen` 补一个 `webServer`（可选）
+
+桌面版自带 `webServer` 服务（页面要用它），**headless 里没有**。`dsh-image-gen` 依赖它，
+所以只勾上面那个框的话，它会一直停在 `pending (waiting for services: credentials, webServer)`，
+`generate_image` 这个工具就永远长不出来。
+
+两个办法任选：
+
+- **只让她用 SD 画**：不勾 `dsh-image-gen`，勾 `sd-bridge-guard` 就行——本机 SD 那套不依赖 `webServer`。
+- **想让她用 `generate_image`**：把仓库里的 `tools/dsh-webserver-lite` 装上，给 headless 补这层服务。
+
+  ```bash
+  # 1) 链进 headless profile（Windows 用 mklink /J，或管理员 PowerShell 的 New-Item -ItemType Junction）
+  ln -s "<项目目录>/tools/dsh-webserver-lite" "$HOME/.dsh/profiles/headless/node_modules/dsh-webserver-lite"
+  ```
+
+  然后编辑 `~/.dsh/profiles/headless/cordis.patch.yml`，在**末尾**加两段。注意新增插件必须先写
+  `insert:`——直接写 `- id: xxx` 会被当成"改已有条目"，报 `entry "xxx" not found`：
+
+  ```yaml
+  # 打开默认关掉的凭据服务（dsh-image-gen 也要它）
+  - id: credentials
+    disabled: false
+  # 新增：极简 webServer
+  - insert:
+      - id: webserver-lite
+        name: dsh-webserver-lite
+  ```
+
+  重启桥，再问她「你手上有 generate_image 吗」，回「有」就成了。
+
+  这层服务只监听 `127.0.0.1` 的随机端口、只提供插件自己注册的路由，不对外。
+
 ---
 
 ### 一句安全说明

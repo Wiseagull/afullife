@@ -4,3 +4,4 @@
 > 攒够几条、某条又复发过，就照 `_模板.md` 整理成正式卡片。
 
 - 例子：`命令一条都跑不起来（exit 127）` → 先确认用的是 bash 还是 PowerShell，别混着写。
+- `bsk_session start` 报 no browser is currently connected → 别换 URL 重试；得他先把带 browser-skill 扩展的浏览器打开、等插件显示 connected。没连上就换件事做，别自己开浏览器去凑。

@@ -4,6 +4,7 @@ import { normalizeEvent } from '../src/body/room.mjs';
 import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
+import { openingMood } from '../src/body/freetime.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -142,8 +143,17 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   const a = lib.add({ src: blurp('fake.png', jpeg), tags: ['猫'] }).item;
   check('按文件头取名', a.file.endsWith('.jpg'), true);
   const b = lib.add({ src: blurp('real.png', png), tags: ['重复'] }).item;
-  const c = lib.add({ src: blurp('b.png', png), tags: ['可爱'] }).item;
-  const d = lib.add({ src: blurp('c.png', png), tags: ['呆'] }).item;
+  const pngB = Buffer.concat([png, Buffer.from('b')]);
+  const pngC = Buffer.concat([png, Buffer.from('c')]);
+  const c = lib.add({ src: blurp('b.png', pngB), tags: ['可爱'] }).item;
+  const d = lib.add({ src: blurp('c.png', pngC), tags: ['呆'] }).item;
+
+  // 1.5 内容一样、名字不一样 = 重复。QQ 转发会换文件名，老判据（同名同大小）拦不住；
+  //     2026-10-22 库里那 6 组重复全是这种（k0328=k0008 等，字节完全相同）。
+  const twin = lib.add({ src: blurp('renamed.png', pngB) });
+  check('同内容不同名算重复', twin.dup, true);
+  check('重复的指回原来那张', twin.item.id, c.id);
+  check('库里没多出一条', lib.stats().count, 4);
 
   // 2. prune 删掉的不能从盘上复活（换实例再读、再存一次都不行）
   const out = lib.prune({ maxCount: 2, maxMb: 200 }, () => {});
@@ -168,6 +178,24 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('reject 掉的不复活', !new StickerLibrary({ file: tmpFile, dir: tmpDir, root: tmpRoot }).get(bad.id));
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
+
+// ── 自由活动的开场 ──────────────────────────────────────
+// 06:31 那次：他 05:39 说了晚安去睡，我六点半醒来，协议硬要我先说一句话。
+// 现在房间里没人就不硬开这个口。
+{
+  const at = (h, m = 0) => new Date(2026, 9, 22, h, m, 0).getTime();
+  const now = at(14, 0);
+  const inAt = (t, text, dir = 'in') => ({ lastTs: t, lastDir: dir, lastInTs: t, lastInText: text });
+
+  check('没人说过话就不硬开', openingMood({}, { now }).quiet, true);
+  check('他刚说了晚安', openingMood(inAt(at(13, 58), '晚安～抱抱'), { now }).quiet, true);
+  check('他十分钟前刚说话', openingMood(inAt(at(13, 50), '在干嘛'), { now }).quiet, false);
+  check('他三小时没出声了', openingMood(inAt(at(10, 30), '吃了吗'), { now }).quiet, true);
+  check('大半夜没人', openingMood(inAt(at(22, 30), '今天好累'), { now: at(23, 40) }).quiet, true);
+  check('白天正常开口', openingMood(inAt(at(13, 20), '刚吃完饭'), { now }).quiet, false);
+  // 最后一句是我说的也算：只要他隔了够久
+  check('我说完他就没影了', openingMood({ lastTs: at(9, 0), lastDir: 'out', lastInTs: at(8, 50), lastInText: '早' }, { now }).quiet, true);
 }
 
 // ── 结果 ────────────────────────────────────────────────

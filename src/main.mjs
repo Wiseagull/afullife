@@ -159,6 +159,19 @@ const freeTime = new FreeTime({
   interests,
   // 她上一段自己说过的话，带进这一拍，免得一段一段重复同一句
   recent: () => selfLines(events.readRecent({ limit: 60 }), freeRoomKey(), 3),
+  // 这个房间最后一条是谁说的、他上一次开口是什么时候——开场该不该硬开口看这个
+  roomState: () => {
+    const room = freeRoomKey();
+    const list = events.readRecent({ room, limit: 40 });
+    const last = list.length ? list[list.length - 1] : null;
+    const lastIn = list.slice().reverse().find((e) => e.dir === 'in') || null;
+    return {
+      lastTs: last?.ts ?? 0,
+      lastDir: last?.dir ?? '',
+      lastInTs: lastIn?.ts ?? 0,
+      lastInText: String(lastIn?.text ?? ''),
+    };
+  },
   drafts: (n = 3) => selfDrafts.render(n),
 });
 // 没人叫的时候，她自己隔一阵掷一次骰子，掷到了就在你不在电脑前时醒一段
@@ -273,6 +286,15 @@ function selfNames() {
   return [client.selfName, ...(cfg.group?.names || [])].filter(Boolean);
 }
 
+/** 看头几个字节认图片格式，认不出就 null（交给调用方兜底）。 */
+function sniffImage(buf) {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 4 && buf.subarray(0, 4).toString('latin1') === 'GIF8') return 'gif';
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return null;
+}
+
 /** 把收到的图存到本地 —— 存不下的就跳过，不能因为一张图把消息丢了。 */
 async function saveImages(msg) {
   const dir = path.join(cfg.dataDir, 'images');
@@ -283,7 +305,9 @@ async function saveImages(msg) {
       const res = await fetch(url);
       if (!res.ok) continue;
       const buf = Buffer.from(await res.arrayBuffer());
-      const ext = (url.match(/\.(png|jpe?g|gif|webp)/i)?.[1] || 'png').toLowerCase();
+      // 按文件头定扩展名：QQ 给的地址后缀经常是假的（.png 里装 jpg），
+      // 名字错了 read_image 会直接拒读，所以宁可自己嗅一遍。
+      const ext = sniffImage(buf) || (url.match(/\.(png|jpe?g|gif|webp)/i)?.[1] || 'png').toLowerCase();
       const file = path.join(dir, `${msg.msgId || Date.now()}-${i}.${ext}`);
       fs.writeFileSync(file, buf);
       files.push(file);

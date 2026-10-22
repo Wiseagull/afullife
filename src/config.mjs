@@ -66,6 +66,7 @@ const DEFAULTS = {
     maxMessages: 3,             // 这段时间里最多主动说几句
     permission: 'look',         // look 只看不动 / act 可以动手 / full 全套
     minGapMs: 3600000,          // 两段之间至少隔多久
+    skipIfActiveMs: 300000,     // 他这么久之内说过话 → 这一拍让路（0 = 不让路）
     room: '',                   // 在哪段对话里活动（空 = 主人私聊）
   },
   debounceMs: 2000,           // 连发聚批窗口（真人连环发消息，等它们凑成一批）

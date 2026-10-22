@@ -14,7 +14,10 @@
 //   node scripts/sticker-lib.mjs stats                            # 多少张、多大
 //   node scripts/sticker-lib.mjs prune [--count=300] [--mb=200] [--dry]  # 满了清用得最少的
 //   node scripts/sticker-lib.mjs screen [--max=4]                 # 把候选过一遍眼，决定收不收
+//   node scripts/sticker-lib.mjs dedupe [--dry]                   # 按内容找重复，后收的标「重复」
 //   node scripts/sticker-lib.mjs where                            # 现在是谁在写库（桥 / 本地）
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, loadConfig } from '../src/config.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
@@ -171,6 +174,43 @@ if (cmd === 'screen') {
 }
 
 switch (cmd) {
+  case 'dedupe': {
+    // 按内容认图，不按名字：QQ 转发一张表情会换名字，只有字节不变。
+    // 每组留标签/语境最全的那条（一样全就留最早收的），其余加「重复」——
+    // prune 的第一档就是「重复」，所以标完下次清库先走它们，不删记录也不删图。
+    const fp = (p) => {
+      try { return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex').slice(0, 16); } catch { return null; }
+    };
+    const s = await snapshot();
+    const byHash = new Map();
+    for (const it of s.items) {
+      const p = path.isAbsolute(it.file) ? it.file : path.resolve(ROOT, it.file);
+      const h = fp(p);
+      if (!h) continue;
+      if (!byHash.has(h)) byHash.set(h, []);
+      byHash.get(h).push(it);
+    }
+    const groups = [...byHash.values()].filter((g) => g.length > 1);
+    // 「重复」这个标不算分量：它只是记号，不是内容信息。否则会挑出
+    // 一张空图当主、把有标签的那张标成重复（2026-10-22 dry 第一次跑就撞上了）。
+    const rank = (it) => (((it.tags || []).filter((t) => t !== '重复').length ? 1 : 0) + (it.when ? 1 : 0));
+    let marked = 0;
+    for (const g of groups) {
+      g.sort((a, b) => rank(b) - rank(a) || (a.addedAt || 0) - (b.addedAt || 0));
+      const [keep, ...rest] = g;
+      console.log(`留 ${keep.id} [${(keep.tags || []).join('/') || '未分类'}] ${keep.when || ''}`);
+      for (const it of rest) {
+        const mine = it.tags || [];
+        if (mine.includes('重复')) { console.log(`  · ${it.id} 早就标了重复`); continue; }
+        if (dry) { console.log(`  · ${it.id} 会标重复`); continue; }
+        const r = await write('update', { id: it.id, tags: [...mine, '重复'] });
+        console.log(`  · ${it.id} ${r.item ? '标了重复' : '没改成'}`);
+        if (r.item) marked += 1;
+      }
+    }
+    console.log(`${groups.length} 组重复，${marked} 张新标上「重复」（${s.via === 'bridge' ? '桥' : '本地'}）${dry ? '｜dry' : ''}`);
+    break;
+  }
   case 'list': {
     const s = await snapshot();
     const items = s.items;
@@ -236,6 +276,6 @@ switch (cmd) {
     console.log(
       '用法：list | pickup <路径> [--tags=] [--when=] [--from=] | tag <id> [--tags=] [--when=] | ' +
       'find [--tags=] [--text=] [--todo] | use <id> | drop <id> | ' +
-      'pending | screen [--max=4] | stats | prune [--count=300] [--mb=200] [--dry] | where',
+      'pending | screen [--max=4] | dedupe [--dry] | stats | prune [--count=300] [--mb=200] [--dry] | where',
     );
 }

@@ -1,0 +1,3 @@
+# webserver-lite 自己不往外暴露任何东西，也不需要配置。
+- id: webserver-lite
+  name: dsh-webserver-lite
