@@ -234,7 +234,13 @@ export class FreeTime {
     this.#timer = null;
     if (!this.#running) return;
     if (Date.now() >= this.#endsAt) return this.#finish('时间到');
-    const task = () => this.#beat().then(() => { this.#errors = 0; }).catch((e) => {
+    // 这一拍不占"说话锁"——锁只管真要发出去那一下（见 #say）。
+    //
+    // 以前整拍都排在锁里：这一拍想 90-150 秒，他那句话就在后面等 90-150 秒，
+    // 连"在呢"都垫不出来。想事情不打扰任何人，不该让人等。
+    // 会不会撞车？这一拍回来要发之前会再看一眼房间（#yieldBecause），
+    // 他在这拍里说过话就咽回去，所以并发想、串行说，不会两个声音。
+    this.#beat().then(() => { this.#errors = 0; }).catch((e) => {
       this.#log('free', `这一拍出错：${e?.message ?? e}`);
       this.#errors = (this.#errors || 0) + 1;
       // 连着出错说明不是偶发：别一路空转，说一声、停下来
@@ -245,8 +251,6 @@ export class FreeTime {
       }
       this.#schedule(15000);
     });
-    if (this.#queue) this.#queue.push(task, `${this.#room}::free`);
-    else task();
   }
 
   async #beat() {
@@ -442,6 +446,17 @@ export class FreeTime {
       // 同样按"算不算打断"判：他只是在催，就继续说下去。
       guard: () => !this.#yieldBecause(beatStart).yield,
     });
+    if (sent?.yielded) {
+      // 排到说话锁了才发现他插过话：跟"想完就发现"一样处理——咽回去，存草稿。
+      const why = this.#yieldBecause(beatStart).why || '他中途开口了';
+      this.#draft = { text, why: 'turn', at: Date.now(), sentParts: [] };
+      this.#swallowed += 1;
+      this.#swallowWhy = why;
+      this.#last = `排到说话锁的这会儿他带着新话进来了（${why}），这句咽回去了（下拍看还发不发）。`;
+      this.#log('free', `排队时他插话，这句不发：${why}`);
+      this.#schedule(this.#beatMs());
+      return;
+    }
     if (sent?.aborted) {
       const why = this.#yieldBecause(beatStart).why || '他中途开口了';
       this.#swallowed += 1;
@@ -469,7 +484,9 @@ export class FreeTime {
     if (!this.#roomState) return false;
     try {
       const st = this.#roomState() || {};
-      return st.lastDir === 'in' && Number(st.lastTs || 0) > Number(ts || 0);
+      // 用 >= 不用 >：同一毫秒里发生的算"赶上了"。
+      // 宁可多咽一句（草稿还留着，下拍会摆回眼前），也别把一句按旧状态想的话发出去。
+      return st.lastDir === 'in' && Number(st.lastTs || 0) >= Number(ts || 0);
     } catch {
       return false;
     }
@@ -494,18 +511,37 @@ export class FreeTime {
   async #say(text, { free = false, guard = null } = {}) {
     const opts = {};
     if (guard) opts.shouldContinue = guard;
-    try {
+    const doSend = async () => {
+      // 排到锁了才真发。等锁的这段时间里他可能已经插话了，
+      // 所以在这儿再问一次 guard —— 该咽就咽，别把按旧状态想的话发出去。
+      if (guard && !guard()) return { yielded: true };
       await this.#send(text, opts);
-      if (opts.aborted) {
-        if (!free) this.#messages += 1; // 说出去了半句，也算说过
-        this.#draft = { text, why: 'mid', at: Date.now(), sentParts: opts.sentParts || [] };
-        return { aborted: true, sentParts: opts.sentParts || [] };
-      }
-      if (!free) this.#messages += 1;
-      return { aborted: false, sentParts: [text] };
+      return { aborted: !!opts.aborted };
+    };
+    // 发出去这一下才排队：保证"一个我一次只说一句"。
+    // 排在前面的是他的一句话（前景优先），那就等这一轮说完再说——反正
+    // 等的时候 guard 还会再问一次"他刚才是不是插话了"，该咽就咽。
+    let out;
+    try {
+      out = this.#queue
+        ? await this.#queue.push(doSend, `${this.#room}::say`)
+        : await doSend();
     } catch (e) {
       this.#log('free', `发不出去：${e?.message ?? e}`);
       return null;
     }
+    // 队列吞掉异常时给的是 undefined：跟"没发出去"一样处理
+    if (!out) {
+      this.#log('free', '发不出去（队列没返回结果）');
+      return null;
+    }
+    if (out.yielded) return { yielded: true };
+    if (out.aborted) {
+      if (!free) this.#messages += 1; // 说出去了半句，也算说过
+      this.#draft = { text, why: 'mid', at: Date.now(), sentParts: opts.sentParts || [] };
+      return { aborted: true, sentParts: opts.sentParts || [] };
+    }
+    if (!free) this.#messages += 1;
+    return { aborted: false, sentParts: [text] };
   }
 }
