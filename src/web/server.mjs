@@ -25,6 +25,8 @@ const EDITABLE = [
   'group.keywords',
   'group.social',
   'debounceMs',
+  'brain.headless.chatProfile',
+  'brain.headless.rotateAtTokens',
   'ack',
   'send.split',
   'send.gapMs',

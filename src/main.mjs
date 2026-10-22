@@ -144,6 +144,8 @@ const interests = new InterestStore({ file: interestFile(cfg) });
 
 // 用量账本：每轮记一笔，面板能看、她自己也看得到
 const usageStore = new UsageStore({ dir: cfg.usage?.dir || 'data/usage' });
+// 每个房间“上一步上下文有多大”。超阈值就换新会话，免得每步都重看几万字历史。
+const contextPerStep = new Map();
 const usagePrice = cfg.usage?.price || null;
 const usageCurrency = cfg.usage?.currency || '¥';
 try {
@@ -264,8 +266,11 @@ function recordUsage(roomKey, result, kind = 'chat') {
   const u = result && result.usage;
   if (!u) return;
   try {
-    usageStore.add({ room: roomKey, usage: u, model: cfg.brain?.model || '', kind });
-    L('usage', `${kind} ${roomKey} 用了 ${u.totalTokens} token（缓存 ${u.cacheReadTokens}）`);
+    const steps = Number(result.steps) || 0;
+    usageStore.add({ room: roomKey, usage: u, model: cfg.brain?.model || '', kind, steps });
+    // 每步上下文 = 这一轮总共读了多少 ÷ 步数。它会随会话变长而涨，涨到阈值就该换会话。
+    if (steps > 0) contextPerStep.set(roomKey, Math.round(u.totalTokens / steps));
+    L('usage', `${kind} ${roomKey} 用了 ${u.totalTokens} token（缓存 ${u.cacheReadTokens}，${steps} 步，每步约 ${steps > 0 ? Math.round(u.totalTokens / steps) : 0}）`);
   } catch (e) {
     L('usage', `记账失败：${e?.message ?? e}`);
   }
@@ -661,6 +666,17 @@ async function handleBatch(roomKey, msgs) {
   if (brain.kind === 'none') {
     L('brain', `(none) 不回答：${roomKey} ${msgs.length} 条 —— 设 brain.kind 才会开口`);
     return;
+  }
+
+  // 会话越长，每一步都要把整段历史重看一遍——那是真正的账单大头。
+  // 每步上下文超过阈值就换一个新会话：新会话第一轮只有工具说明那么大（轻装约 1 万），
+  // 而“她记得什么”本来就不靠会话历史，靠 events / notes / 这里塞进去的最近对话。
+  const perStep = contextPerStep.get(roomKey) || 0;
+  const rotateAt = Number(cfg.brain?.headless?.rotateAtTokens ?? 60000);
+  if (perStep > rotateAt && sessions.get(roomKey)) {
+    sessions.clear(roomKey);
+    contextPerStep.delete(roomKey);
+    L('brain', `会话上下文 ${perStep} token 够大了（阈值 ${rotateAt}），这个房间换新会话`);
   }
 
   const sid = sessions.get(roomKey);

@@ -73,14 +73,15 @@ export class UsageStore {
     return path.join(this.#dir, `usage-${date}.jsonl`);
   }
 
-  /** 记一轮。usage 来自 headless 的 status 事件。 */
-  add({ room = '', usage = null, model = '', kind = 'chat' } = {}) {
+  /** 记一轮。usage 来自 headless 的 status 事件；steps 是这一轮走了几步。 */
+  add({ room = '', usage = null, model = '', kind = 'chat', steps = 0 } = {}) {
     if (!usage) return null;
     const row = {
       at: new Date().toISOString(),
       room: String(room || ''),
       kind,
       model: String(model || ''),
+      steps: Number(steps) || 0,
     };
     for (const k of KEYS) row[k] = Number(usage[k]) || 0;
     fs.appendFileSync(this.fileOf(ymd()), JSON.stringify(row) + '\n', 'utf8');

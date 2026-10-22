@@ -151,6 +151,9 @@ export class HeadlessBrain {
       // inputTokens 是新喂进去的，cacheReadTokens 是命中缓存的那部分（便宜得多）。
       const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
       let usageSeen = false;
+      // 一步 = 模型看一遍上下文再决定下一步。步数用来算“每步上下文多大”，
+      // 那个数才是真正决定单轮成本的东西（会话越长它越大）。
+      let steps = 0;
 
       const finish = (fn, value) => {
         if (settled) return;
@@ -175,6 +178,7 @@ export class HeadlessBrain {
         else if (ev.type === 'text' && typeof ev.text === 'string') streamed += ev.text;
         else if (ev.type === 'status' && ev.usage) {
           usageSeen = true;
+          steps += 1;
           for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens']) {
             const n = Number(ev.usage[k]);
             if (Number.isFinite(n)) usage[k] += n;
@@ -221,7 +225,7 @@ export class HeadlessBrain {
           finish(reject, new Error(`headless 报错：${errors.join('; ').slice(-400)}`));
           return;
         }
-        finish(resolve, { text, sessionId, usage: usageSeen ? usage : null });
+        finish(resolve, { text, sessionId, usage: usageSeen ? usage : null, steps: usageSeen ? steps : 0 });
       });
 
       child.stdin.write(prompt);
