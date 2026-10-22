@@ -176,11 +176,15 @@ const freeTime = new FreeTime({
     const list = events.readRecent({ room, limit: 40 });
     const last = list.length ? list[list.length - 1] : null;
     const lastIn = list.slice().reverse().find((e) => e.dir === 'in') || null;
+    // 他那句是叫她（@ 她）还是回她（引用她说过的某条）——群里的别人聊天不算
+    const mineIds = new Set(list.filter((e) => e.dir === 'out' && e.msgId).map((e) => String(e.msgId)));
     return {
       lastTs: last?.ts ?? 0,
       lastDir: last?.dir ?? '',
       lastInTs: lastIn?.ts ?? 0,
       lastInText: String(lastIn?.text ?? ''),
+      lastInAtMe: lastIn?.atMe === true,
+      lastInReplyToMe: Boolean(lastIn?.replyId && mineIds.has(String(lastIn.replyId))),
     };
   },
   drafts: (n = 3) => selfDrafts.render(n),

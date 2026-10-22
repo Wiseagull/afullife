@@ -33,6 +33,25 @@ function ago(ms) {
   return `${Math.round(d / 3600_000)} 小时前`;
 }
 
+// 他这一句，到底算不算"打断"。
+//
+// 之前一刀切：这一拍里他开口了，这句就咽回去。但两种情况下那句话其实没过期：
+//   1. 他只是"嗯""继续""然后呢"——那不是新信息，是催她往下说；
+//   2. 群里是别人在聊，既没 @ 她、也不是回她——跟她这句没关系。
+// 只有真的"他带着新信息插进来"才值得咽。
+const NUDGE = /^(嗯+|哦+|嗷+|好+|行|可以|对|是|继续|接着说|你继续|然后呢|还有呢|说下去|接着说下去|接着|继续吧|讲|说说|go\s*on|and\?*)[。！？!?.…~～\s]*$/i;
+
+export function shouldYield(roomState = {}, { room = '' } = {}) {
+  if (!roomState || roomState.lastDir !== 'in') return { yield: false, why: '他没开口' };
+  const his = String(roomState.lastInText || '').replace(/\s+/g, ' ').trim();
+  if (his && NUDGE.test(his)) return { yield: false, why: `他在催你继续说（「${his.slice(0, 12)}」）` };
+  const isGroup = String(room).startsWith('group:');
+  if (isGroup && roomState.lastInAtMe === false && roomState.lastInReplyToMe !== true) {
+    return { yield: false, why: '那是别人在说话，不是在叫你' };
+  }
+  return { yield: true, why: `他刚开口（「${his.slice(0, 12)}」）` };
+}
+
 // 咽回去的那句，下一拍要不要还给她。
 //
 // 光"咽回去"不够：那句话是花了几十秒想出来的，扔掉等于白想一次；
@@ -116,6 +135,9 @@ export class FreeTime {
   #interests = null;
   #drafts = null;      // 攒着的「也许想记下来的」
   #draft = null;       // 被咽回去的那句，下一拍还给她（不是丢掉）
+  #swallowed = 0;      // 这一段咽回去过几次（太多说明拍太长）
+  #swallowWhy = '';    // 最近一次为什么咽
+  #thinkMs = 0;        // 这一段想事情一共花了多少毫秒
   #reviewed = false;   // 这一段有没有回顾过
   #openingQuiet = false; // 开场这一句是不是"没人也应"的，允许不回
 
@@ -153,6 +175,11 @@ export class FreeTime {
       maxMessages: Number(f.maxMessages ?? 3),
       permission: f.permission || 'look',
       reason: this.#reason,
+      // 观测用：咽回去几次、平均每拍想多久——这两个数偏大就该把拍调短
+      swallowed: this.#swallowed,
+      swallowWhy: this.#swallowWhy,
+      avgThinkMs: this.#beats ? Math.round(this.#thinkMs / this.#beats) : 0,
+      draft: this.#draft ? { text: String(this.#draft.text).slice(0, 80), why: this.#draft.why, at: this.#draft.at } : null,
     };
   }
 
@@ -172,6 +199,9 @@ export class FreeTime {
     this.#openTries = 0;
     this.#last = '';
     this.#draft = null;
+    this.#swallowed = 0;
+    this.#swallowWhy = '';
+    this.#thinkMs = 0;
     this.#sid = null;
     this.#reason = '';
     this.#log('free', `自由活动开始：${Math.round(dur / 60000)} 分钟，权限=${f.permission || 'look'}，最多说 ${f.maxMessages ?? 3} 句`);
@@ -334,6 +364,7 @@ export class FreeTime {
     if (r?.sessionId) this.#sid = r.sessionId;
     const text = String(r?.text ?? '').trim();
     this.#beats += 1;
+    this.#thinkMs += Date.now() - t0;
     this.#log('free', `第 ${this.#beats} 拍 ${Date.now() - t0}ms：${text.slice(0, 60).replace(/\s+/g, ' ')}`);
 
     // 这一拍想得久，他中途已经开口了：这句话是按开口前的状态想的，不当场发。
@@ -341,14 +372,22 @@ export class FreeTime {
     // 12:31:48 那次就是这么撞上的：这一拍从 12:30:16 想了一分半，中间他 12:30:42
     // 说了「今天别人下载了我的项目…」，我 12:31:48 还在说「评审那批复跑过了」，
     // 桥隔了 21 秒又回一句「丢给我嘛，我一条条对过去」——两个声音，两份状态。
-    // 发之前再看一眼房间：他在这拍开始之后说过话，就把这句咽回去。
+    // 发之前再看一眼房间：他带着新信息插进来了，这句就按旧状态了。
     // 不是丢掉——存成草稿，下一拍开头摆回她眼前，让她自己决定还发不发。
-    if (!/^(<pass\s*\/?>|pass|<wait:\s*\d+\s*\/?>|<done\s*\/?>)$/i.test(text) && this.#himSpokeSince(beatStart)) {
+    // （他说「嗯」「继续」这种催她的话不算打断；群里别人说话、没叫她也不算。）
+    const verdict = this.#yieldBecause(beatStart);
+    const isTalk = !/^(<pass\s*\/?>|pass|<wait:\s*\d+\s*\/?>|<done\s*\/?>)$/i.test(text);
+    if (isTalk && verdict.yield) {
       this.#draft = { text, why: 'turn', at: Date.now(), sentParts: [] };
-      this.#last = '他刚好在这一拍里开口了，这句按旧状态想的，咽回去了（下拍看还发不发）。';
-      this.#log('free', '这一拍里他说话了，这句不发，存成草稿下拍再看');
+      this.#swallowed += 1;
+      this.#swallowWhy = verdict.why;
+      this.#last = `他刚好在这一拍里带着新话进来了（${verdict.why}），这句按旧状态想的，咽回去了（下拍看还发不发）。`;
+      this.#log('free', `这句不发：${verdict.why}`);
       this.#schedule(this.#beatMs());
       return;
+    }
+    if (isTalk && !verdict.yield && verdict.why && this.#himSpokeSince(beatStart)) {
+      this.#log('free', `他这会儿也说话了，但${verdict.why}——照发`);
     }
 
     // 结束
@@ -400,11 +439,15 @@ export class FreeTime {
     const sent = await this.#say(text, {
       free: opening && !this.#openingQuiet,
       // 分几条发的时候，中间那几秒里他可能插话——每发下一条之前再问一次。
-      guard: () => !this.#himSpokeSince(beatStart),
+      // 同样按"算不算打断"判：他只是在催，就继续说下去。
+      guard: () => !this.#yieldBecause(beatStart).yield,
     });
     if (sent?.aborted) {
-      this.#last = '发到一半他开口了，剩下的几句没发（下拍看还接不接）。';
-      this.#log('free', `发到第 ${sent.sentParts.length} 段他开口了，后面咽回去`);
+      const why = this.#yieldBecause(beatStart).why || '他中途开口了';
+      this.#swallowed += 1;
+      this.#swallowWhy = why;
+      this.#last = `发到一半他带着新话进来了（${why}），剩下的几句没发（下拍看还接不接）。`;
+      this.#log('free', `发到第 ${sent.sentParts.length} 段他插话（${why}），后面咽回去`);
     } else {
       this.#last = sent ? `她跟他说：「${text.slice(0, 50)}」` : '她说了句，但没发出去。';
     }
@@ -429,6 +472,16 @@ export class FreeTime {
       return st.lastDir === 'in' && Number(st.lastTs || 0) > Number(ts || 0);
     } catch {
       return false;
+    }
+  }
+
+  /** 他这一拍里说的话，算不算"打断"（要不要因此咽回这句）。 */
+  #yieldBecause(ts) {
+    if (!this.#himSpokeSince(ts)) return { yield: false, why: '' };
+    try {
+      return shouldYield(this.#roomState() || {}, { room: this.#room });
+    } catch {
+      return { yield: true, why: '他开口了' }; // 判断不了就保守：宁可咽
     }
   }
 

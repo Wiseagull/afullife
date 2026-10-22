@@ -4,7 +4,7 @@ import { normalizeEvent } from '../src/body/room.mjs';
 import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
-import { openingMood, draftLines } from '../src/body/freetime.mjs';
+import { openingMood, draftLines, shouldYield } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
 import { buildPrompt } from '../src/body/prompt.mjs';
 import { selfLines, agoLabel } from '../src/memory/context.mjs';
@@ -288,6 +288,23 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   // 没有草稿就不写这一段
   check('没草稿就不提', draftLines(null, hi, { now }), null);
   check('空句子不算草稿', draftLines({ text: '   ', why: 'turn', at: now }, hi, { now }), null);
+}
+
+// ── 他这一句算不算"打断" ────────────────────────────────
+{
+  const priv = 'private:1';
+  const grp = 'group:9';
+  const say = (text, extra = {}) => ({ lastDir: 'in', lastTs: 1, lastInText: text, ...extra });
+
+  check('嗯不算打断', shouldYield(say('嗯'), { room: priv }).yield, false);
+  check('继续不算打断', shouldYield(say('继续'), { room: priv }).yield, false);
+  check('然后呢 不算打断', shouldYield(say('然后呢'), { room: priv }).yield, false);
+  check('嗯嗯嗯 不算打断', shouldYield(say('嗯嗯嗯'), { room: priv }).yield, false);
+  check('带新信息才打断', shouldYield(say('评审那批我看过了'), { room: priv }).yield, true);
+  check('群里别人聊天不算打断', shouldYield(say('这游戏好玩', { lastInAtMe: false, lastInReplyToMe: false }), { room: grp }).yield, false);
+  check('群里叫他算打断', shouldYield(say('这游戏好玩', { lastInAtMe: true }), { room: grp }).yield, true);
+  check('群里回他也算打断', shouldYield(say('这游戏好玩', { lastInAtMe: false, lastInReplyToMe: true }), { room: grp }).yield, true);
+  check('他没说话就不管', shouldYield({ lastDir: 'out', lastInText: '随便' }, { room: priv }).yield, false);
 }
 
 // ── 结果 ────────────────────────────────────────────────

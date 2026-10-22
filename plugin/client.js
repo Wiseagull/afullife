@@ -1018,6 +1018,14 @@ window.__ModuleLoader__.load({
                   : (s.reason ? `上一段：${s.reason}` : '没在自由活动'))
               : null,
           ),
+          // 咽回去几次、每拍想多久——这两个数偏大就说明拍太长，该调短
+          s && (s.beats || s.swallowed)
+            ? h('div', { style: { ...S.tiny, marginTop: 4 } },
+                `咽回去 ${s.swallowed || 0} 次`,
+                s.swallowWhy ? `（最近一次：${s.swallowWhy}）` : '',
+                s.avgThinkMs ? ` · 平均每拍想 ${Math.round(s.avgThinkMs / 1000)} 秒` : '',
+                s.draft ? ` · 手上还压着一句没发：「${String(s.draft.text).slice(0, 24)}」` : '')
+            : null,
           h('div', { style: { ...S.tiny, marginTop: 6 } }, '开始之前记得先保存上面的设置。'),
           err ? h('div', { style: S.err }, err) : null,
         ),
