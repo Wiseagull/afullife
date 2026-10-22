@@ -269,7 +269,8 @@ function recordUsage(roomKey, result, kind = 'chat') {
     const steps = Number(result.steps) || 0;
     usageStore.add({ room: roomKey, usage: u, model: cfg.brain?.model || '', kind, steps });
     // 每步上下文 = 这一轮总共读了多少 ÷ 步数。它会随会话变长而涨，涨到阈值就该换会话。
-    if (steps > 0) contextPerStep.set(roomKey, Math.round(u.totalTokens / steps));
+    // 只按对话轮算：自由活动用的是另一条自己的会话，不该拿它的数去换房间的会话。
+    if (steps > 0 && kind !== 'free') contextPerStep.set(roomKey, Math.round(u.totalTokens / steps));
     L('usage', `${kind} ${roomKey} 用了 ${u.totalTokens} token（缓存 ${u.cacheReadTokens}，${steps} 步，每步约 ${steps > 0 ? Math.round(u.totalTokens / steps) : 0}）`);
   } catch (e) {
     L('usage', `记账失败：${e?.message ?? e}`);
@@ -673,7 +674,8 @@ async function handleBatch(roomKey, msgs) {
   // 而“她记得什么”本来就不靠会话历史，靠 events / notes / 这里塞进去的最近对话。
   const perStep = contextPerStep.get(roomKey) || 0;
   const rotateAt = Number(cfg.brain?.headless?.rotateAtTokens ?? 60000);
-  if (perStep > rotateAt && sessions.get(roomKey)) {
+  // rotateAt 写 0 或负数 = 不轮换（否则 perStep > 0 会每轮都换，等于没有记忆）
+  if (rotateAt > 0 && perStep > rotateAt && sessions.get(roomKey)) {
     sessions.clear(roomKey);
     contextPerStep.delete(roomKey);
     L('brain', `会话上下文 ${perStep} token 够大了（阈值 ${rotateAt}），这个房间换新会话`);
