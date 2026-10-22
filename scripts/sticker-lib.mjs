@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, loadConfig } from '../src/config.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
+import { readToken } from '../src/web/token.mjs';
 
 const cfg = loadConfig({ logger: { warn: () => {} } });
 const PORT = Number(process.env.QAD_WEB_PORT || cfg.web?.port || 3220);
@@ -32,7 +33,7 @@ async function bridge(method, payload) {
   try {
     r = await fetch(URL_BASE, {
       method,
-      headers: { 'x-qad-ui': '1', 'content-type': 'application/json' },
+      headers: { 'x-qad-ui': '1', 'x-qad-token': readToken(path.join(ROOT, 'data')), 'content-type': 'application/json' },
       body: method === 'POST' ? JSON.stringify(payload || {}) : undefined,
       signal: AbortSignal.timeout(2500),
     });

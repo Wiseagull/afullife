@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { ROOT, notebookDir } from '../config.mjs';
+import { ensureToken, TOKEN_HEADER } from './token.mjs';
 import { ensureSnowLuma } from '../snowluma/launch.mjs';
 import { isPortOpen } from '../snowluma/runtime.mjs';
 import { listToggleable, installPlugins, uninstallPlugins } from './plugins.mjs';
@@ -111,6 +112,8 @@ async function readBody(req) {
  * @param {(ev: object) => void} [deps.onConfig]
  */
 export function startWeb({ cfg, logger, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onConfig }) {
+  // 本机接口的令牌：所有 /api/* 都要带，见 src/web/token.mjs 顶上那段说明
+  const TOKEN = ensureToken(path.join(ROOT, 'data'));
   const conf = cfg.web || {};
   if (conf.enabled === false) return null;
 
@@ -131,6 +134,11 @@ export function startWeb({ cfg, logger, notes, pending, events, sessions, router
 
     if (req.method === 'OPTIONS') return json(res, 204, null, origin);
     if (req.headers['x-qad-ui'] !== '1') return json(res, 403, { error: 'missing x-qad-ui' }, origin);
+    // 令牌：本机任何程序都读得到 data/web-token，但"随手一敲"敲不进来。
+    // 见 src/web/token.mjs 顶上那段（2026-10-22 外部评审的 S1）。
+    if (String(req.headers[TOKEN_HEADER] || '') !== TOKEN) {
+      return json(res, 401, { error: 'missing or wrong x-qad-token（看 data/web-token）' }, origin);
+    }
 
     const url = new URL(req.url, 'http://127.0.0.1');
     const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
@@ -315,7 +323,8 @@ export function startWeb({ cfg, logger, notes, pending, events, sessions, router
         const dir = notebookDir(cfg);
         const target = (p) => {
           const abs = path.resolve(dir, String(p || ''));
-          if (!abs.startsWith(path.resolve(dir))) throw new Error('只能读小本本里的文件');
+          const rel = path.relative(path.resolve(dir), abs);
+          if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('只能读小本本里的文件');
           return abs;
         };
         if (req.method === 'GET') {
@@ -427,8 +436,18 @@ export function startWeb({ cfg, logger, notes, pending, events, sessions, router
         const b = full
           ? new HeadlessBrain({ ...cfg.brain.headless, permissionMode: 'danger-full-access', logger: null })
           : brain;
+        // 试人设也要走闸：不然这就是一个"让 agent 随便干活"的本地入口（评审 S1）。
+        const onEvent = (ev) => {
+          if (ev?.type !== 'tool_call') return;
+          const v = gate.check(ev.tool, ev.input);
+          if (v.level === 'block') {
+            const err = new Error(`被闸拦下：${v.why}`);
+            err.code = 'GATE_BLOCKED';
+            throw err;
+          }
+        };
         const t0 = Date.now();
-        const r = await b.run({ prompt });
+        const r = await b.run({ prompt, onEvent });
         return json(res, 200, {
           ok: true,
           text: r?.text || '',

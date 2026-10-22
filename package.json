@@ -5,7 +5,7 @@
   "type": "module",
   "description": "把 QQ 接进 DeepSeek Harness：一个身份、一份记忆，横跨 QQ 和 DSH。",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node src/main.mjs",

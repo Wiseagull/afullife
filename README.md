@@ -93,7 +93,7 @@ AFULLIFE，a full life。不是缩写游戏，是一句许愿：**give your QQbo
 
 1. **装好 DSH 桌面版**（DeepSeek Harness），**最低 `0.2.1-rc.2`**——面板插件在
    `plugin/package.json` 里声明了 `engines.dsh`，旧版装不上面板，会卡在第 6 步。
-   建议同时装 Node 20 以上（桥不依赖它，但脚本要用）。
+   建议同时装 Node 22 以上（桥用 DSH 自带的运行时就能跑，但命令行脚本、以及需要全局 `WebSocket` 的地方要用 22+）。
 2. **装好 SnowLuma 并在里面登录 QQ**——项目不自带它，也只跟它说话
    （[github.com/SnowLuma/SnowLuma](https://github.com/SnowLuma/SnowLuma)）。
 3. `git clone https://github.com/Wiseagull/afullife.git afullife && cd afullife`

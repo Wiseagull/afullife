@@ -37,7 +37,7 @@ README 里的[快速开始](../README.md#快速开始)是压缩版。
    没装的话先去装：[github.com/SnowLuma/SnowLuma](https://github.com/SnowLuma/SnowLuma)。
    装好打开 `http://localhost:5099`（初始密码在它的启动日志里），在 WebUI 里接入 QQ，
    再把 OneBot 的 WebSocket / HTTP 两个服务开着。**这一步不做，后面全都白搭。**
-3. **Node 20 以上**（建议装）—— 桥用 DSH 自带的运行时就能跑，但
+3. **Node 22 以上**（建议装）—— 桥用 DSH 自带的运行时就能跑，但
    `node scripts/find-snowluma.mjs` 这类脚本、以及她自己写小本本时敲的 `node ...` 命令要用它。
 
 ---

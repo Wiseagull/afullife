@@ -58,6 +58,12 @@ export class OneBotClient extends EventEmitter {
       ? `${this.wsUrl}${sep}access_token=${encodeURIComponent(this.accessToken)}`
       : this.wsUrl;
 
+    if (typeof WebSocket === 'undefined') {
+      // Node 20 没有全局 WebSocket（21 起才默认有）。经 DSH 的 Electron 跑没问题。
+      this.#connecting = false;
+      this.#schedule('这个 Node 没有全局 WebSocket —— 需要 Node 22+，或者用 DSH 自带的那份 Electron 起桥');
+      return;
+    }
     let ws;
     try {
       ws = new WebSocket(url);

@@ -3,7 +3,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 
-import { loadConfig, ensureDirs, ROOT, interestFile, personaFile, notebookDir } from './config.mjs';
+import { loadConfig, ensureDirs, ROOT, interestFile, personaFile, notebookDir, workerDir } from './config.mjs';
 import { log } from './util/log.mjs';
 import { OneBotClient } from './onebot/client.mjs';
 import { ensureSnowLuma } from './snowluma/launch.mjs';
@@ -15,7 +15,7 @@ import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke
 import { renderForwardNodes, pickNodes } from './body/forward.mjs';
 import { buildPrompt, buildFollowup, NOPOWER_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
-import { setWorkspaceRoots } from './safety/rules.mjs';
+import { setWorkspaceRoots, underWorkspace } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
 import { NotesStore } from './memory/notes.mjs';
@@ -112,7 +112,7 @@ const pending = new PendingStore({ file: path.join(cfg.dataDir, 'memory', 'pendi
 
 // 自由活动：她自己待一段时间的那个循环
 function freeRoomKey() {
-  return cfg.freeTime?.room || `private:${cfg.owner.userIds[0] || cfg.owner.userIds[0]}`;
+  return cfg.freeTime?.room || `private:${cfg.owner.userIds[0] ?? 'owner'}`;
 }
 async function freeSay(text) {
   const room = freeRoomKey();
@@ -215,15 +215,20 @@ const gate = new Gate({
 let awaiting = null;
 const APPROVAL_TTL = 10 * 60 * 1000;
 
-// 整理记忆用的脑子：工作目录在项目根（那儿没有 AGENTS.md），免得它入戏。
-// 给它更长的超时——体检要一次看完几十条记忆，120 秒不够用。
+// 整理记忆用的脑子：工作目录是一个**空目录**（data/worker）。
+//
+// 2026-10-22 外部评审抓到的矛盾：老注释写"工作目录在项目根（那儿没有 AGENTS.md）"，
+// 可 AGENTS.md 恰恰就在项目根，而 headless 是"cwd 决定加载哪份 AGENTS.md"——
+// 于是整理员会读到那套第一人称规矩，和 design.md「整理员不加载人格」的承诺相反。
+// 现在真的给它一个空目录，两边对上了。
+// 另外给它更长的超时——体检要一次看完几十条记忆，120 秒不够用。
 const worker = cfg.brain?.kind === 'headless'
   ? createBrain({
       ...cfg,
       brain: {
         ...cfg.brain,
         kind: 'headless',
-        workspace: ROOT,
+        workspace: workerDir(),
         headless: { ...(cfg.brain.headless || {}), timeoutMs: cfg.maintainTimeoutMs || 300000 },
       },
     }, L)
@@ -552,7 +557,7 @@ client.on('event', async (raw) => {
   const { speak, reason } = router.decide(msg);
 
   // 他回话了 —— 如果之前问过"哪个对"，这句就是他的说法
-  if (msg.from && cfg.owner.userIds.includes(Number(msg.from))) {
+  if (msg.from && cfg.owner.userIds.includes(String(msg.from))) {
     const answered = pending.markAnswered({ room: msg.room, text: msg.text });
     if (answered) L('memory', `他解释了「${answered.noteText}」`);
   }
@@ -652,7 +657,7 @@ async function handleBatch(roomKey, msgs) {
   // 给每条编号：她想引着某句回的时候，就写 [[reply:2]] 指第 2 条
   msgs.forEach((m, i) => { m.idx = i + 1; });
   // 手边有什么表情，摆出来她才想得起来用
-  const stickerLine = renderStickers(stickerLib.search({ limit: 8 }));
+  const stickerLine = renderStickers(stickerLib.search({ limit: 8 }), cfg.sticker?.style);
   const isGroup = last.kind === 'group';
   // 这句是不是冲我来的：@ 到了，或者提了我的名字/关键词
   const addressed = msgs.some(
@@ -697,13 +702,17 @@ async function handleBatch(roomKey, msgs) {
   // 谁能让她动手，只看"这话是谁说的"：
   //   - 特权号说的 → 直通（只记账）；整批都是特权号，才算真直通
   //   - 别人说的   → 一个工具都不许用，直接推掉，不来问、也不许绕
+  // 只有"这一批全是主人说的"才给动手。
+  //
+  // 2026-10-22 外部评审：老实现只要"最后一句是主人"就按 makeOnEvent 放行 note 级动作，
+  // 于是群里 A 说"帮我把这个下载下来跑一下"、主人随后随便回一句，两条挤进同一个聚批窗口
+  // 就变成了"主人授权"。现在混批一律收手——他要动手，单独发一条就行。
   const trusted = msgs.length > 0 && msgs.every((m) => isRoot(m.from));
   const fromOwner = isRoot(last.from);
-  const onEvent = !fromOwner
-    ? makeDenyAllOnEvent(roomKey)
-    : (trusted ? makeAuditOnEvent(roomKey) : makeOnEvent(roomKey));
+  const onEvent = trusted ? makeAuditOnEvent(roomKey) : makeDenyAllOnEvent(roomKey);
   if (trusted) L('gate', `特权直通：${roomKey}（${msgs.length} 条），只记账不拦`);
-  else if (!fromOwner) L('gate', `没有特权号：${roomKey} 这一轮只能用嘴`);
+  else if (fromOwner) L('gate', `这一批里混了别人的话：${roomKey} 这一轮只能用嘴`);
+  else L('gate', `没有特权号：${roomKey} 这一轮只能用嘴`);
 
   let result = null;
   // 真干起来要时间（尤其她翻文件、画图的时候），先给一句话，别让人干等着。
@@ -783,11 +792,11 @@ async function handleBatch(roomKey, msgs) {
   }
 
   clearTimeout(ackTimer);
-  await finishTurn(roomKey, last, result, conflicts);
+  await finishTurn(roomKey, last, result, conflicts, msgs);
 }
 
 /** 一轮的话说出去、记下来。 */
-async function finishTurn(roomKey, last, result, conflicts = []) {
+async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
   if (result?.sessionId) sessions.set(roomKey, result.sessionId);
   const text = String(result?.text ?? '').trim();
   if (!text) {
@@ -804,7 +813,7 @@ async function finishTurn(roomKey, last, result, conflicts = []) {
           prompt: '（他就在私聊里等着你回话。刚才你想沉默，但这里不能沉默——回他一句，短一点也行。）\n' + oneLine(last.text ?? ''),
           sessionId: sessions.get(roomKey),
         });
-        return await finishTurn(roomKey, last, Object.assign({}, r, { __retried: true }), conflicts);
+        return await finishTurn(roomKey, last, Object.assign({}, r, { __retried: true }), conflicts, msgs);
       } catch (e) {
         L('brain', `追一句失败：${e?.message ?? e}`);
         return;
@@ -858,6 +867,28 @@ async function finishTurn(roomKey, last, result, conflicts = []) {
     try {
       if (!fs.existsSync(p)) {
         L('send', `图不在：${p}`);
+        continue;
+      }
+      // 只能发白名单里的图（表情库、项目内）。不然群里有人哄她"发那张家里的照片"，
+      // 这条通路绕过闸、也绕过审计的路径遮罩——2026-10-22 外部评审指出的洞。
+      if (!underWorkspace(p)) {
+        L('send', `不许发白名单外的图：${p}`);
+        continue;
+      }
+      try {
+        const head = Buffer.alloc(12);
+        const fd = fs.openSync(p, 'r');
+        try { fs.readSync(fd, head, 0, 12, 0); } finally { fs.closeSync(fd); }
+        if (!sniffImage(head)) {
+          L('send', `不像图片，不发：${p}`);
+          continue;
+        }
+        if (fs.statSync(p).size > 12 * 1024 * 1024) {
+          L('send', `图太大（>12MB），不发：${p}`);
+          continue;
+        }
+      } catch (err) {
+        L('send', `验图失败，不发（${p}）：${err?.message ?? err}`);
         continue;
       }
       const one = last.kind === 'group'
@@ -918,7 +949,7 @@ async function rerunApproved(a) {
   const onEvent = makeOnEvent(a.roomKey);
   try {
     const result = await brain.run({ prompt: a.prompt, sessionId: a.sid, room: a.roomKey, onEvent });
-    await finishTurn(a.roomKey, a.last, result, []);
+    await finishTurn(a.roomKey, a.last, result, [], []);
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       const b = gate.blocked;
@@ -1037,11 +1068,12 @@ async function idleSay(roomKey, mode = 'idle') {
   const body = renderTranscript(recent.filter((e) => e.text));
   const prompt = `${ask}\n\n【最近的对话】\n${body || '（没什么内容）'}`;
   const sid = sessions.get(roomKey);
-  const onEvent = makeOnEvent(roomKey);
+  // 没人在场（冷场/自己开话题）：她可以说话，但一个工具都不许用。
+  const onEvent = makeDenyAllOnEvent(roomKey);
 
   try {
     const result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent });
-    await finishTurn(roomKey, { kind: 'group', id: gid, text: '', msgId: null }, result, []);
+    await finishTurn(roomKey, { kind: 'group', id: gid, text: '', msgId: null }, result, [], []);
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       L('gate', `冷场开口时被拦：${gate.blocked.verdict.why}`);

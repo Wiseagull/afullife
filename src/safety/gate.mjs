@@ -45,6 +45,7 @@ export class Gate {
   /** 他答应了这一条。 */
   approve(tool, input) {
     this.allowOnce.add(signature(tool, input));
+    this.blocked = null;   // 问了就了结：不清掉，下次会拿旧的那条去问
   }
 
   /** 他答应了这一类：这一轮剩下的时间都放它过去，这一轮结束就收。 */
@@ -55,6 +56,7 @@ export class Gate {
   /** 一轮结束：把"这一轮有效"的钥匙收回来。 */
   endTurn() {
     this.turnRules.clear();
+    this.blocked = null;
   }
 
   /** 他拒绝了：清掉，什么都不留。 */

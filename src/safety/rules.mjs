@@ -3,6 +3,9 @@
 //
 // 三档：allow（不打扰）/ note（做，但记账）/ block（停下来问他）
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 /** 只在看、不动手的东西。 */
 const READ_ONLY_TOOLS = new Set([
   'read', 'glob', 'grep', 'web_search', 'web_fetch',
@@ -26,15 +29,27 @@ export function setWorkspaceRoots(roots = []) {
   }
 }
 
-const norm = (p) => String(p || '').replace(/\//g, '\\').toLowerCase();
+// 判断一个路径在不在白名单里。
+//
+// 2026-10-22 外部评审指出的洞：老实现是纯字符串前缀比较，
+// `data\..\..\..\Windows\System32\drivers\etc\hosts` 会被判成"在白名单内"。
+// 所以现在先 path.resolve 把 .. 摊平（相对路径以项目根为基准），
+// 存在的话再 realpath 一次，把 junction / 符号链接 / 8.3 短名也摊平，然后才比。
+function realish(p) {
+  const abs = path.resolve(process.cwd(), p);
+  try { return fs.realpathSync.native(abs); } catch { return abs; }
+}
+
+function rootList() {
+  return WORKSPACE_ROOTS.map((r) => realish(String(r)).toLowerCase()).filter(Boolean);
+}
 
 export function underWorkspace(file) {
-  const f = norm(file);
-  if (!f) return false;
-  return WORKSPACE_ROOTS.some((root) => {
-    const r = norm(root);
-    return f === r || f.startsWith(`${r}\\`);
-  });
+  const raw = String(file || '').trim().replace(/^["']|["']$/g, '');
+  if (!raw) return false;
+  const target = realish(raw).toLowerCase();
+  if (!target) return false;
+  return rootList().some((r) => target === r || target.startsWith(r + path.sep));
 }
 
 /** 命令里出现的盘符路径（粗提取，够用就好）。 */

@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBridge, stopBridge, stopBridgeHard } from './supervisor.js';
+import { readToken, TOKEN_HEADER } from '../src/web/token.mjs';
 
 export const name = 'afullife-panel';
 export const inject = ['webServer'];
@@ -68,6 +69,8 @@ export function apply(ctx) {
               method: req.method,
               headers: {
                 'x-qad-ui': '1',
+                // 桥要令牌（见 src/web/token.mjs）。每次现读：桥可能是刚起来才写的。
+                [TOKEN_HEADER]: readToken(path.join(PROJECT_DIR, 'data')),
                 'content-type': req.headers['content-type'] || 'application/json',
               },
               body: chunks.length ? Buffer.concat(chunks) : undefined,

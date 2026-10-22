@@ -60,7 +60,8 @@ const DEFAULTS = {
   },
   // 自由活动：给她一段自己的时间（看电脑、上网、想干嘛干嘛）
   freeTime: {
-    enabled: false,             // 总开关（面板上也能直接开一段）
+    // 没有 enabled 这个总开关：真正的开关是 auto.enabled（自己找时间醒）与面板上手动开一段。
+    // 老版本留过一个 freeTime.enabled，代码里从来没读过——2026-10-22 外部评审指出，删掉。
     durationMs: 1800000,        // 一段多长
     beatMs: 75000,              // 每隔多久叫她一拍
     maxMessages: 3,             // 这段时间里最多主动说几句
@@ -265,6 +266,12 @@ export function interestFile(cfg = {}) {
 }
 
 /** 小本本落在哪儿（默认项目里的 notebook/，可用 config.notebook.dir 改） */
+/** 整理员（记忆整理/体检）的工作目录：一个空目录。
+ *  headless 是"cwd 决定加载哪份 AGENTS.md"，让它待在空目录里才不会读到人设入戏。 */
+export function workerDir() {
+  return path.join(ROOT, 'data', 'worker');
+}
+
 export function notebookDir(cfg = {}) {
   const rel = cfg?.notebook?.dir || 'notebook';
   return path.isAbsolute(rel) ? rel : path.join(ROOT, rel);
