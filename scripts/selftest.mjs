@@ -5,6 +5,9 @@ import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
 import { openingMood } from '../src/body/freetime.mjs';
+import { UsageStore, describeUsage } from '../src/usage/store.mjs';
+import { buildPrompt } from '../src/body/prompt.mjs';
+import { ROOT } from '../src/config.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -196,6 +199,45 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('白天正常开口', openingMood(inAt(at(13, 20), '刚吃完饭'), { now }).quiet, false);
   // 最后一句是我说的也算：只要他隔了够久
   check('我说完他就没影了', openingMood({ lastTs: at(9, 0), lastDir: 'out', lastInTs: at(8, 50), lastInText: '早' }, { now }).quiet, true);
+}
+
+// ── 用量账本 ─────────────────────────────────────────────
+{
+  const dir = path.join(ROOT, 'tmp', 'selftest-usage');
+  fs.rmSync(dir, { recursive: true, force: true });
+  const store = new UsageStore({ dir });
+  store.add({ room: 'private:1', usage: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 4000, totalTokens: 5100 } });
+  store.add({ room: 'group:2', usage: { inputTokens: 500, outputTokens: 50, cacheReadTokens: 2000, totalTokens: 2550 } });
+  const today = store.today();
+  check('账本：轮数', today.turns, 2);
+  check('账本：token 累加', today.totalTokens, 7650);
+  check('账本：房间拆开', today.rooms.length, 2);
+  check('账本：落盘一天一个文件', fs.existsSync(path.join(dir, 'usage-' + new Date().toISOString().slice(0, 10) + '.jsonl')), true);
+  const d = describeUsage(today);
+  check('描述里有轮数', d.includes('2 轮'), true);
+  check('描述里有缓存', d.includes('缓存'), true);
+  check('没填单价就不报钱', today.cost, null);
+
+  const priced = store.today(undefined, { price: { inputPerM: 2, outputPerM: 8, cacheReadPerM: 0.5 } });
+  // 新输入 1500 * 2/M + 输出 150 * 8/M + 缓存 6000 * 0.5/M = 0.003 + 0.0012 + 0.003 = 0.0072
+  check('填了单价就能算钱', Math.round((priced.cost || 0) * 10000) / 10000, 0.0072);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── 提示词里的用量块 ─────────────────────────────────────
+{
+  const withUsage = buildPrompt({
+    roomKey: 'private:1',
+    messages: [{ kind: 'private', from: '1', fromName: '先生', text: '在吗' }],
+    usageLine: '2 轮 / 3.8 万 token',
+  });
+  check('提示词带用量', withUsage.includes('【今天的量】'), true);
+  check('用量里有数字', withUsage.includes('3.8 万'), true);
+  const noUsage = buildPrompt({
+    roomKey: 'private:1',
+    messages: [{ kind: 'private', from: '1', fromName: '先生', text: '在吗' }],
+  });
+  check('没用量就不写这一段', noUsage.includes('【今天的量】'), false);
 }
 
 // ── 结果 ────────────────────────────────────────────────

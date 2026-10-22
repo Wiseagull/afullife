@@ -144,6 +144,10 @@ export class HeadlessBrain {
       let finalText = '';
       let streamed = '';
       const errors = [];
+      // 一轮用掉多少 token：DSH 在 status 事件里带 usage（一步一条，这里累加）。
+      // inputTokens 是新喂进去的，cacheReadTokens 是命中缓存的那部分（便宜得多）。
+      const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+      let usageSeen = false;
 
       const finish = (fn, value) => {
         if (settled) return;
@@ -166,6 +170,13 @@ export class HeadlessBrain {
         if (ev.type === 'session' && ev.sessionId) sessionId = String(ev.sessionId);
         else if (ev.type === 'final' && typeof ev.text === 'string') finalText = ev.text;
         else if (ev.type === 'text' && typeof ev.text === 'string') streamed += ev.text;
+        else if (ev.type === 'status' && ev.usage) {
+          usageSeen = true;
+          for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens']) {
+            const n = Number(ev.usage[k]);
+            if (Number.isFinite(n)) usage[k] += n;
+          }
+        }
         else if (ev.type === 'error') errors.push(String(ev.message || ev.error || JSON.stringify(ev)));
 
         // 闸挂在这里：看到 tool_call 当场判，红了就掐。
@@ -207,7 +218,7 @@ export class HeadlessBrain {
           finish(reject, new Error(`headless 报错：${errors.join('; ').slice(-400)}`));
           return;
         }
-        finish(resolve, { text, sessionId });
+        finish(resolve, { text, sessionId, usage: usageSeen ? usage : null });
       });
 
       child.stdin.write(prompt);

@@ -560,6 +560,123 @@ window.__ModuleLoader__.load({
     }
 
     // ── 事件 ────────────────────────────────────────────────────────────
+    // ── 用量 ────────────────────────────────────────────────────────────
+    // 每轮花了多少 token，记在 data/usage/ 里；她自己也看得到（提示词里带一句 + scripts/usage.mjs）
+    function UsageTab() {
+      const [u, setU] = useState(null);
+      const [err, setErr] = useState('');
+      const [price, setPrice] = useState({ inputPerM: 0, outputPerM: 0, cacheReadPerM: 0 });
+      const [currency, setCurrency] = useState('¥');
+      const [saving, setSaving] = useState(false);
+      const [priceMsg, setPriceMsg] = useState('');
+      const load = () => api('/api/usage?days=7')
+        .then((r) => {
+          setU(r);
+          if (r && r.price) setPrice({ inputPerM: r.price.inputPerM || 0, outputPerM: r.price.outputPerM || 0, cacheReadPerM: r.price.cacheReadPerM || 0 });
+          if (r && r.currency) setCurrency(r.currency);
+        })
+        .catch((e) => setErr(e.message));
+      useEffect(() => { load(); }, []);
+      const savePrice = async () => {
+        setSaving(true);
+        setPriceMsg('');
+        try {
+          await api('/api/config', {
+            method: 'POST',
+            body: JSON.stringify({
+              usage: {
+                currency: currency || '¥',
+                price: {
+                  inputPerM: Number(price.inputPerM) || 0,
+                  outputPerM: Number(price.outputPerM) || 0,
+                  cacheReadPerM: Number(price.cacheReadPerM) || 0,
+                },
+              },
+            }),
+          });
+          await load();
+          setPriceMsg('存好了，上面的数会按新单价重算');
+        } catch (e) {
+          setPriceMsg('没存上：' + e.message);
+        } finally {
+          setSaving(false);
+        }
+      };
+      const priceInput = (label, key) => h('label', { style: { ...S.tiny, display: 'flex', gap: 4, alignItems: 'center' } },
+        label,
+        h('input', {
+          type: 'number',
+          value: price[key],
+          style: { ...S.input, width: 74 },
+          onChange: (e) => setPrice({ ...price, [key]: e.target.value }),
+        }),
+      );
+      const wan = (n) => (n >= 10000 ? (n / 10000).toFixed(1) + ' 万' : String(n || 0));
+      const cost = (agg) => (u && u.price && agg && agg.cost !== null && agg.cost !== undefined && agg.cost > 0
+        ? ' · ' + u.currency + agg.cost
+        : '');
+      const today = u && u.today;
+      return h('div', null,
+        err ? h('div', { style: S.err }, err) : null,
+        !u ? h('div', { style: S.tiny }, '读取中…') : null,
+        today
+          ? h('div', { style: { marginBottom: 10 } },
+            h('div', { style: { fontSize: 13, fontWeight: 600 } },
+              '今天：' + (today.turns || 0) + ' 轮 / ' + wan(today.totalTokens) + ' token' + cost(today)),
+            h('div', { style: S.tiny },
+              '新输入 ' + wan(today.inputTokens) + ' · 输出 ' + wan(today.outputTokens)
+              + ' · 命中缓存 ' + wan(today.cacheReadTokens)
+              + '（缓存便宜得多，命中率高不代表花得多）'),
+            !u.price
+              ? h('div', { style: S.tiny }, '没填单价，所以只报 token。想看到花费，在 config.local.json 的 usage.price 里按你的模型价填（每百万 token 多少钱）。')
+              : null,
+          )
+          : null,
+        today && today.rooms && today.rooms.length
+          ? h('div', null,
+            h('div', { style: S.tiny }, '按房间：'),
+            today.rooms.map((r) => h('div', { key: r.room, style: S.item },
+              h('div', { style: { flex: 1 } },
+                h('div', null, r.room.replace(/^private:/, '私聊 ').replace(/^group:/, '群 ')),
+                h('div', { style: S.tiny }, (r.turns || 0) + ' 轮 · ' + wan(r.totalTokens) + ' token' + cost(r)),
+              ),
+            )),
+          )
+          : null,
+        u && u.days
+          ? h('div', { style: { marginTop: 10 } },
+            h('div', { style: S.tiny }, '最近 7 天：'),
+            u.days.slice().reverse().map((d) => h('div', { key: d.date, style: S.item },
+              h('div', { style: { flex: 1 } },
+                h('div', null, d.date + '  ' + wan(d.totalTokens) + ' token' + cost(d)),
+                h('div', { style: S.tiny }, (d.turns || 0) + ' 轮 · 输出 ' + wan(d.outputTokens)),
+              ),
+            )),
+          )
+          : null,
+        h('div', { style: { marginTop: 14, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,.08)' } },
+          h('div', { style: S.tiny }, '想看到花多少钱，填你用的模型单价（每百万 token，填 0 = 只报 token）：'),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 } },
+            priceInput('输入', 'inputPerM'),
+            priceInput('输出', 'outputPerM'),
+            priceInput('命中缓存', 'cacheReadPerM'),
+          ),
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 } },
+            h('span', { style: S.tiny }, '货币符号'),
+            h('input', {
+              value: currency,
+              style: { ...S.input, width: 60 },
+              onChange: (e) => setCurrency(e.target.value),
+            }),
+            h('button', { style: S.btn(saving), onClick: savePrice }, saving ? '保存中…' : '保存单价'),
+          ),
+          priceMsg ? h('div', { style: S.tiny }, priceMsg) : null,
+        ),
+        h('div', { style: { marginTop: 10 } }, h('div', { style: S.tiny },
+          '这些数也写进了她的提示词（【今天的量】），她自己能看见；命令行 node scripts/usage.mjs 也能查。')),
+      );
+    }
+
     function EventsTab() {
       const [events, setEvents] = useState([]);
       const [err, setErr] = useState('');
@@ -932,6 +1049,7 @@ window.__ModuleLoader__.load({
         ['tools', '工具'],
         ['persona', '人设'],
         ['pending', '待确认'],
+        ['usage', '用量'],
         ['events', '事件'],
         ['sessions', '会话'],
       ];
@@ -988,6 +1106,7 @@ window.__ModuleLoader__.load({
         tab === 'tools' ? h(ToolsTab) : null,
         tab === 'persona' ? (cfg ? h(PersonaTab, { cfg, set: setCfg }) : h('div', { style: S.tiny }, '读取配置中…')) : null,
         tab === 'pending' ? h(PendingTab) : null,
+        tab === 'usage' ? h(UsageTab) : null,
         tab === 'events' ? h(EventsTab) : null,
         tab === 'sessions' ? h(SessionsTab) : null,
       );

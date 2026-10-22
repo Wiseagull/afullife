@@ -110,6 +110,7 @@ export const KNOW_HINT = [
   `（你自己那份 persona/self.md 也随时能改，跟整理表情包一样不用问：node scripts/self.mjs add 喜欢 "…" / add 讨厌 "…" / log "…"，在项目根 ${ROOT} 下跑。）`,
   '（上下文里每条消息前头的标注——形如 <acp …> 或 m00123 这种编号——是系统加的书签，不是话。别把它们抄进回复里。）',
   `（小本本 notebook/ 是你自己的：想记住的事随手写下 —— node scripts/notebook.mjs write "…"；看就 read --days=3，找就 find <词>，都在项目根 ${ROOT} 下跑。）`,
+  `（花掉多少你也看得到：今天、各房间、最近几天 —— node scripts/usage.mjs，想看一周就 node scripts/usage.mjs 7，在项目根 ${ROOT} 下跑。）`,
 ].join('\n');
 
 const BLANK = String.fromCharCode(10, 10);
@@ -131,11 +132,22 @@ export const SELF_INSTRUCTION = [
   '- 他让你动手就动手，做不了就直说卡在哪一步，别装。',
 ].join('\n');
 
-export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null }) {
+// 她自己也该知道自己今天花了多少——不然「省着点」这句话对她没有参照。
+const USAGE_NOTE = '（这三个数记在 data/usage/，想看更细就 `node scripts/usage.mjs today`。）';
+
+function usageBlock(usageLine) {
+  return usageLine ? `【今天的量】${usageLine}${USAGE_NOTE}` : '';
+}
+
+export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null, usageLine = '' }) {
   const lines = [];
 
   lines.push(`【房间】${roomKey}`);
   lines.push('');
+  {
+    const u = usageBlock(usageLine);
+    if (u) { lines.push(u); lines.push(''); }
+  }
 
   // 人格分层：核心卡由 DSH 自己按工作区 AGENTS.md 加载；
   // 群聊手册与“我自己的部分”放在项目里，这里按场合补上
@@ -183,10 +195,11 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
  * 接着上次说时用：只把这次要回的话递过去（外加一小段别处的动静）。
  * 本房间的上下文由会话自己记着。
  */
-export function buildFollowup(messages, { delta = '', isGroup = false, addressed = false, selfNames = [], stickerLine = '', personaNote = '', rules = '' } = {}) {
+export function buildFollowup(messages, { delta = '', isGroup = false, addressed = false, selfNames = [], stickerLine = '', personaNote = '', rules = '', usageLine = '' } = {}) {
   // 人格每一轮都要带：会话是接着聊的，但提示词每轮新拼，不放进去她就只剩记忆和对白
   const person = personaNote ? personaNote + String.fromCharCode(10, 10) : '';
-  const head = delta ? `${delta}\n\n${KNOW_HINT}\n\n` : '';
+  const usage = usageBlock(usageLine);
+  const head = (usage ? usage + '\n\n' : '') + (delta ? `${delta}\n\n${KNOW_HINT}\n\n` : '');
   const body = isGroup
     ? buildTriggerLines(messages, { selfNames }).join('\n')
     : renderTranscript(messages);

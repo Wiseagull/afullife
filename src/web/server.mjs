@@ -34,6 +34,8 @@ const EDITABLE = [
   'owner.userIds',
   'memory.rooms',
   'sticker.style',
+  'usage.price',
+  'usage.currency',
   'poke',
   'web.allowFullAccess',
 ];
@@ -111,7 +113,7 @@ async function readBody(req) {
  * @param {object} deps.brain
  * @param {(ev: object) => void} [deps.onConfig]
  */
-export function startWeb({ cfg, logger, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onConfig }) {
+export function startWeb({ usageStore, cfg, logger, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onConfig }) {
   // 本机接口的令牌：所有 /api/* 都要带，见 src/web/token.mjs 顶上那段说明
   const TOKEN = ensureToken(path.join(ROOT, 'data'));
   const conf = cfg.web || {};
@@ -295,6 +297,20 @@ export function startWeb({ cfg, logger, notes, pending, events, sessions, router
       }
 
       // ── 小本本 ──
+      if (area === 'usage' && req.method === 'GET') {
+        if (!usageStore) return json(res, 503, { error: '桥这边没接用量账本' }, origin);
+        const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days') || 7)));
+        const price = cfg.usage?.price || null;
+        const currency = cfg.usage?.currency || '¥';
+        return json(res, 200, {
+          ok: true,
+          currency,
+          price,
+          today: usageStore.today(undefined, { price }),
+          days: usageStore.days(days, { price }),
+        }, origin);
+      }
+
       if (area === 'notebook' && req.method === 'GET' && !id) {
         const dir = notebookDir(cfg);
         const files = [];

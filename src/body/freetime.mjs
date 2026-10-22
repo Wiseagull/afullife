@@ -77,19 +77,21 @@ export class FreeTime {
   #recent = null;
   #roomState = null;
   #room;
+  #onUsage;
   #reason = '';
   #interests = null;
   #drafts = null;      // 攒着的「也许想记下来的」
   #reviewed = false;   // 这一段有没有回顾过
   #openingQuiet = false; // 开场这一句是不是"没人也应"的，允许不回
 
-  constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts }) {
+  constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts, onUsage }) {
     this.#cfg = cfg;
     this.#brain = brain;
     this.#send = send;
     this.#log = logger || (() => {});
     this.#queue = queue || null;
     this.#room = room || 'private';
+    this.#onUsage = onUsage || null;
     // 上一段/这一段时间里她自己说过的话，喂一拍开头，免得一段一段重复同一句
     this.#recent = recent || null;
     // 这个房间最后一条是谁说的、隔了多久——决定开场要不要硬开口
@@ -282,6 +284,7 @@ export class FreeTime {
 
     const t0 = Date.now();
     const r = await this.#brain.run({ prompt, sessionId: this.#sid });
+    try { this.#onUsage?.(this.#room, r, 'free'); } catch { /* 记账失败不影响她说话 */ }
     if (!this.#running) return;
     if (r?.sessionId) this.#sid = r.sessionId;
     const text = String(r?.text ?? '').trim();

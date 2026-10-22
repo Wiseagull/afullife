@@ -22,6 +22,7 @@ import { NotesStore } from './memory/notes.mjs';
 import { buildBackground, buildDelta, selfLines } from './memory/context.mjs';
 import { PendingStore } from './memory/pending.mjs';
 import { InterestStore } from './interests/store.mjs';
+import { UsageStore, describeUsage } from './usage/store.mjs';
 import { distill } from './memory/distill.mjs';
 import { upkeep, upkeepStickers } from './memory/upkeep.mjs';
 import { screenStickers } from './stickers/screen.mjs';
@@ -140,6 +141,11 @@ let lastSelfMtime = (() => {
   try { return fs.statSync(personaFile(cfg, 'self')).mtimeMs; } catch { return 0; }
 })();
 const interests = new InterestStore({ file: interestFile(cfg) });
+
+// 用量账本：每轮记一笔，面板能看、她自己也看得到
+const usageStore = new UsageStore({ dir: cfg.usage?.dir || 'data/usage' });
+const usagePrice = cfg.usage?.price || null;
+const usageCurrency = cfg.usage?.currency || '¥';
 try {
   const selfText = fs.readFileSync(personaFile(cfg, 'self'), 'utf8');
   const synced = interests.sync(selfText);
@@ -150,6 +156,7 @@ try {
 }
 
 const freeTime = new FreeTime({
+  onUsage: recordUsage,
   cfg,
   brain,
   send: freeSay,
@@ -238,6 +245,32 @@ let lastSeenTs = Date.now();
 // 每个房间「上一轮动过手没有」。只认上一轮——用 20 分钟窗口会让一次 web_fetch
 // 把后面半小时全判成干活，闲聊就永远回到精简体。
 const lastRoundTouched = new Map();
+// 拼给提示词的那一句「今天花了多少」：全局 + 这个房间
+function usageLineFor(roomKey) {
+  try {
+    const t = usageStore.today(undefined, { price: usagePrice });
+    if (!t.turns) return '';
+    const all = describeUsage(t, { price: usagePrice, currency: usageCurrency });
+    const mine = t.rooms.find((r) => r.room === roomKey);
+    const mineText = mine ? `；这个房间 ${describeUsage(mine, { price: usagePrice, currency: usageCurrency })}` : '';
+    return all + mineText;
+  } catch {
+    return '';
+  }
+}
+
+// 记一轮的用量。kind: chat（聊天）/ free（自由活动）/ maintain（整理记忆）
+function recordUsage(roomKey, result, kind = 'chat') {
+  const u = result && result.usage;
+  if (!u) return;
+  try {
+    usageStore.add({ room: roomKey, usage: u, model: cfg.brain?.model || '', kind });
+    L('usage', `${kind} ${roomKey} 用了 ${u.totalTokens} token（缓存 ${u.cacheReadTokens}）`);
+  } catch (e) {
+    L('usage', `记账失败：${e?.message ?? e}`);
+  }
+}
+
 const REMEMBER_RE = /(记住|记一下|记下|别忘了|remember)/i;
 const debounce = new Debounce(cfg.debounceMs, (roomKey, msgs) => {
   queue.push(() => handleBatch(roomKey, msgs), roomKey);
@@ -687,12 +720,13 @@ async function handleBatch(roomKey, msgs) {
   });
   const rulesText = verdict.full ? ruleOf(isGroup) : chatRules(isGroup);
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor(isGroup), extra: draftsLine, rules: rulesText });
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor(isGroup), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey) });
   let prompt = sid
     ? buildFollowup(msgs, {
       delta, isGroup, addressed, selfNames: names, stickerLine,
       personaNote: personaNoteFor(isGroup),
       rules: verdict.full ? rulesText : '',
+      usageLine: usageLineFor(roomKey),
     })
     : promptFresh;
 
@@ -797,6 +831,7 @@ async function handleBatch(roomKey, msgs) {
 
 /** 一轮的话说出去、记下来。 */
 async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
+  recordUsage(roomKey, result, 'chat');
   if (result?.sessionId) sessions.set(roomKey, result.sessionId);
   const text = String(result?.text ?? '').trim();
   if (!text) {
@@ -1128,7 +1163,8 @@ const stickerLib = new StickerLibrary({
 pruneStickers();
 
 // ── 面板接口 ─────────────────────────────────────────
-startWeb({ cfg, logger: { info: L, warn: (tag, msg) => L(tag, msg) }, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib });
+startWeb({
+  usageStore, cfg, logger: { info: L, warn: (tag, msg) => L(tag, msg) }, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib });
 
 // ── 起 ───────────────────────────────────────────────────
 client.connect();

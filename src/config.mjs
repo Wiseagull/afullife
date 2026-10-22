@@ -48,6 +48,13 @@ const DEFAULTS = {
       },
     },
   },
+  // 用量账本：每轮 token 记在 data/usage/，面板和她自己都能看。
+  // 单价留 0 = 不显示钱（只报 token）；想看到花费就按你的模型价填。
+  usage: {
+    dir: 'data/usage',
+    currency: '¥',
+    price: { inputPerM: 0, outputPerM: 0, cacheReadPerM: 0 },
+  },
   notebook: {
     dir: 'notebook',      // 她那本小本本放哪（相对项目根）
     limitMb: 20480,        // 整个目录上限，默认 20GB
