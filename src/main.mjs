@@ -302,22 +302,37 @@ const PERSONA_DIR = path.join(ROOT, 'persona');
 function personaOf(name) {
   try { return fs.readFileSync(path.join(PERSONA_DIR, name), 'utf8').trim(); } catch { return ''; }
 }
-function personaNoteFor(isGroup) {
+function personaNoteFor({ isGroup = false, isOwner = true } = {}) {
   // 三层人设都由这里拼进提示词。核心卡以前以为“DSH 会按工作区 AGENTS.md 自动加载”，
   // 但工作区搬进项目之后，那儿的 AGENTS.md 只有干活规矩，一个人设字都没有——
   // 结果她一直没读到 core.md（2026-10-22 她自己翻出来的）。
+  //
+  // 2026-10-22 晚上（主人 m13170）：「core 能不能只针对主人号一个人，其他人不管私聊
+  // 还是群聊都要加载 group」——所以现在按“这话是谁说的”分：
+  //   主人：核心人设（+ 群里再补群聊手册） + 她自己那份
+  //   别人：只有群聊手册，再补一句“这不是先生”，把人设里的称呼关系彻底摘掉
   const parts = [];
-  const core = personaOf('core.md');
-  if (core) parts.push(`【核心人设】
+  if (isOwner) {
+    const core = personaOf('core.md');
+    if (core) parts.push(`【核心人设】
 ${core}`);
-  if (isGroup) {
-    const g = personaOf('group.md');
-    if (g) parts.push(`【群聊手册】
-${g}`);
   }
-  const mine = personaOf('self.md');
-  if (mine) parts.push(`【我自己的部分】
+  if (isGroup || !isOwner) {
+    const g = personaOf('group.md');
+    if (g) {
+      const head = isOwner ? '【群聊手册】' : '【对外的人设：跟主人以外的人说话用这份】';
+      parts.push(`${head}
+${g}`);
+    }
+  }
+  if (isOwner) {
+    const mine = personaOf('self.md');
+    if (mine) parts.push(`【我自己的部分】
 ${mine}`);
+  } else {
+    parts.push('（眼前这个人不是先生本人。别叫他先生，也别把跟先生之间的称呼、约定往他身上套——对他客客气气、像个普通网友那样聊。）');
+  }
+  L('persona', isOwner ? (isGroup ? '主人 · 核心+群聊手册' : '主人 · 核心人设') : '对外人设（非主人）');
   return parts.join(String.fromCharCode(10) + String.fromCharCode(10));
 }
 
@@ -785,6 +800,10 @@ async function handleBatch(roomKey, msgs) {
   lastRoundTouched.set(roomKey, false);
 
   const draftsLine = selfDrafts.render(3);
+  // 谁是"先生"，只看这一批是谁说的——人设也跟着分：
+  // 主人说话 → 核心人设（含称呼、关系、边界）；别人说话 → 只给对外的群聊手册。
+  // 2026-10-22 晚上：陌生人私聊里她一口一个"先生"，就是因为私聊也吃到了核心人设。
+  const allOwner = msgs.length > 0 && msgs.every((m) => isRoot(m.from));
   // 规程按需挂：闲聊只留四句，像要派活才挂全套。
   // 判错不要紧——规程不是权限，工具每轮都在，没挂说明她也照样能调。
   const verdict = judgeFull({
@@ -799,11 +818,11 @@ async function handleBatch(roomKey, msgs) {
   const turnProfile = verdict.full || !chatProfile ? null : chatProfile;
   if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor(isGroup), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey) });
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup, isOwner: allOwner }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey) });
   let prompt = sid
     ? buildFollowup(msgs, {
       delta, isGroup, addressed, selfNames: names, stickerLine,
-      personaNote: personaNoteFor(isGroup),
+      personaNote: personaNoteFor({ isGroup, isOwner: allOwner }),
       rules: verdict.full ? rulesText : '',
       usageLine: usageLineFor(roomKey),
     })
