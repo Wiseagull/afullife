@@ -35,21 +35,34 @@ export function setWorkspaceRoots(roots = []) {
 // `data\..\..\..\Windows\System32\drivers\etc\hosts` 会被判成"在白名单内"。
 // 所以现在先 path.resolve 把 .. 摊平（相对路径以项目根为基准），
 // 存在的话再 realpath 一次，把 junction / 符号链接 / 8.3 短名也摊平，然后才比。
-function realish(p) {
-  const abs = path.resolve(process.cwd(), p);
-  try { return fs.realpathSync.native(abs); } catch { return abs; }
+// 路径判断要能跨平台：2026-10-22 CI 加了 windows-latest 之后发现，
+// 同一份用例在 Linux 上把 "C:\Windows\..." 当成"相对路径、在项目里"，
+// 于是"写系统目录"被判成 note。闸的结论不该随跑在哪个系统而变。
+const WIN_ABS = /^[A-Za-z]:[\\/]/;
+const BACKSLASH = /\\/g;
+
+/** 归一成一个可比较的字符串：绝对、真实（能就 realpath）、正斜杠、小写、去掉结尾斜杠。 */
+function normish(p) {
+  const raw = String(p || '').trim().replace(/^["']|["']$/g, '');
+  if (!raw) return '';
+  // Windows 盘符路径：在非 Windows 上没法 realpath，直接按字面归一（结论仍然是"在项目外"）
+  if (WIN_ABS.test(raw) && process.platform !== 'win32') {
+    return raw.replace(BACKSLASH, '/').replace(/\/+$/, '').toLowerCase();
+  }
+  const abs = path.resolve(process.cwd(), raw);
+  let real = abs;
+  try { real = fs.realpathSync.native(abs); } catch { /* 不存在就用解析后的绝对路径 */ }
+  return real.replace(BACKSLASH, '/').replace(/\/+$/, '').toLowerCase();
 }
 
 function rootList() {
-  return WORKSPACE_ROOTS.map((r) => realish(String(r)).toLowerCase()).filter(Boolean);
+  return WORKSPACE_ROOTS.map((r) => normish(String(r))).filter(Boolean);
 }
 
 export function underWorkspace(file) {
-  const raw = String(file || '').trim().replace(/^["']|["']$/g, '');
-  if (!raw) return false;
-  const target = realish(raw).toLowerCase();
+  const target = normish(file);
   if (!target) return false;
-  return rootList().some((r) => target === r || target.startsWith(r + path.sep));
+  return rootList().some((r) => target === r || target.startsWith(r + '/'));
 }
 
 /** 命令里出现的盘符路径（粗提取，够用就好）。 */
