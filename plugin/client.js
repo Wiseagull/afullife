@@ -569,6 +569,28 @@ window.__ModuleLoader__.load({
       const [currency, setCurrency] = useState('¥');
       const [saving, setSaving] = useState(false);
       const [priceMsg, setPriceMsg] = useState('');
+      // 会话轮换阈值：每步上下文超过这个数就换新会话（见 docs/design.md「省钱的三个杠杆」）
+      const [rotate, setRotate] = useState(60000);
+      const [rotateMsg, setRotateMsg] = useState('');
+      const loadRotate = () => api('/api/config')
+        .then((r) => {
+          const v = r && r.config && r.config.brain && r.config.brain.headless
+            ? r.config.brain.headless.rotateAtTokens
+            : undefined;
+          if (v !== undefined && v !== null) setRotate(v);
+        })
+        .catch(() => {});
+      const saveRotate = async () => {
+        setRotateMsg('');
+        try {
+          const n = Math.max(0, Math.round(Number(rotate) || 0));
+          await api('/api/config', { method: 'POST', body: JSON.stringify({ brain: { headless: { rotateAtTokens: n } } }) });
+          setRotate(n);
+          setRotateMsg(n > 0 ? `存好了：每次超过 ${n} token 就换新会话` : '存好了：不换会话（0）');
+        } catch (e) {
+          setRotateMsg('没存上：' + e.message);
+        }
+      };
       const load = () => api('/api/usage?days=7')
         .then((r) => {
           setU(r);
@@ -576,7 +598,7 @@ window.__ModuleLoader__.load({
           if (r && r.currency) setCurrency(r.currency);
         })
         .catch((e) => setErr(e.message));
-      useEffect(() => { load(); }, []);
+      useEffect(() => { load(); loadRotate(); }, []);
       const savePrice = async () => {
         setSaving(true);
         setPriceMsg('');
@@ -674,6 +696,20 @@ window.__ModuleLoader__.load({
         ),
         h('div', { style: { marginTop: 10 } }, h('div', { style: S.tiny },
           '这些数也写进了她的提示词（【今天的量】），她自己能看见；命令行 node scripts/usage.mjs 也能查。')),
+        h('div', { style: { marginTop: 14, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,.08)' } },
+          h('div', { style: S.tiny }, '省钱：会话里每步的上下文超过这个数，就换一个新会话（换会话不丢记忆，记忆在 events / 小本本里）。0 = 一直不换。'),
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+            h('input', {
+              type: 'number',
+              value: rotate,
+              style: { ...S.input, width: 96 },
+              onChange: (e) => setRotate(e.target.value),
+            }),
+            h('span', { style: S.tiny }, 'token'),
+            h('button', { style: S.btn(false), onClick: saveRotate }, '保存'),
+          ),
+          rotateMsg ? h('div', { style: S.tiny }, rotateMsg) : null,
+        ),
       );
     }
 
