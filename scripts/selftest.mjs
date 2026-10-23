@@ -11,6 +11,8 @@ import { selfLines, agoLabel, refTag, buildBackground } from '../src/memory/cont
 import { SerialQueue } from '../src/body/queue.mjs';
 import { ROOT } from '../src/config.mjs';
 import { handoverPrompt, cleanHandover } from '../src/memory/handover.mjs';
+import { personaNoteFor } from '../src/body/persona-note.mjs';
+import { EventLog } from '../src/memory/events.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -203,6 +205,18 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   try { third.reject(bad.id, '截图'); } finally { fs.renameSync = realRename; fs.unlinkSync = realUnlink; }
   third.markUsed(keep.id);
   ok('reject 掉的不复活', !new StickerLibrary({ file: tmpFile, dir: tmpDir, root: tmpRoot }).get(bad.id));
+
+  // 4. 记录在、图不在：默认还查得到（doctor 的「缺文件」警告靠它），
+  //    但递给提示词时必须滤掉 —— 缺图的路径她照着发只会撞上 send 的「图不在」。
+  {
+    const lostDir = path.join(tmpRoot, 'lost');
+    fs.mkdirSync(lostDir, { recursive: true });
+    const lost = new StickerLibrary({ file: path.join(tmpRoot, 'lost.json'), dir: lostDir, root: tmpRoot });
+    const ghost = lost.add({ src: blurp('ghost.png', png), tags: ['旧'] }).item;
+    fs.unlinkSync(path.resolve(tmpRoot, ghost.file));
+    check('缺图的记录默认还查得到', lost.search({ limit: 10 }).length, 1);
+    check('缺图的不递进提示词', lost.search({ limit: 10, onlyPresent: true }).length, 0);
+  }
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }
@@ -532,6 +546,74 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   const his = renderTranscript([{ dir: 'in', name: '他', text: long }]);
   ok('自己的长话被截断', mine.includes('……（后面还说了一些）') && mine.length < 120);
   ok('别人的长话不截', his.includes(long));
+}
+
+// ── 人格三层真的拼进提示词 ──────────────────────────────
+// 为什么要单测这一段：2026-10-22 之前 core.md 一直以为「DSH 会按 AGENTS.md 自动加载」，
+// 结果 14KB 一次都没进过提示词，谁也没发现——直到她自己读了自己的卡。
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-persona-'));
+  fs.writeFileSync(path.join(dir, 'core.md'), 'CORE-内容');
+  fs.writeFileSync(path.join(dir, 'group.md'), 'GROUP-内容');
+  fs.writeFileSync(path.join(dir, 'self.md'), 'SELF-内容');
+
+  const own = personaNoteFor({ isOwner: true, isGroup: false, dir });
+  ok('主人的私聊带核心人设', own.includes('【核心人设】') && own.includes('CORE-内容'));
+  ok('主人的私聊带她自己那份', own.includes('【我自己的部分】') && own.includes('SELF-内容'));
+  ok('主人的私聊不带群聊手册', !own.includes('GROUP-内容'));
+
+  const ownGroup = personaNoteFor({ isOwner: true, isGroup: true, dir });
+  ok('主人的群里三份都带', ownGroup.includes('CORE-内容') && ownGroup.includes('GROUP-内容') && ownGroup.includes('SELF-内容'));
+
+  const other = personaNoteFor({ isOwner: false, isGroup: true, dir });
+  ok('外人看不到核心人设和她自己那份', !other.includes('CORE-内容') && !other.includes('SELF-内容'));
+  ok('外人只拿对外那份群聊手册', other.includes('【对外的人设') && other.includes('GROUP-内容'));
+  ok('外人不被叫作先生', other.includes('不是先生本人'));
+
+  const logged = [];
+  personaNoteFor({ dir, log: (m) => logged.push(m) });
+  ok('拼完会留一行日志（面板里看得见）', logged.length === 1 && logged[0] === '主人 · 核心人设');
+
+  // 文件没了也不能炸，只是少一段
+  fs.rmSync(path.join(dir, 'core.md'));
+  ok('core 不在时不报错、少一段', !personaNoteFor({ dir }).includes('【核心人设】'));
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── 事件流：只读尾巴，结果要跟整份读一样 ─────────────────
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-events-'));
+  const log = new EventLog({ dir });
+  const days = ['2026-10-21', '2026-10-22', '2026-10-23'];
+  const counts = [5, 900, 9];        // 中间那天故意造得比一次读的块大
+  const all = [];
+  days.forEach((d, di) => {
+    const lines = [];
+    for (let i = 0; i < counts[di]; i += 1) {
+      const ts = new Date(`${d}T12:00:00`).getTime() + i;
+      const rec = { eid: `ev_${di}_${i}`, ts, room: i % 5 === 0 ? 'group:b' : 'group:a', text: `${i}` };
+      lines.push(JSON.stringify(rec));
+      all.push(rec);
+    }
+    fs.writeFileSync(path.join(dir, `events-${d}.jsonl`), lines.join('\n') + '\n');
+  });
+  const naive = (limit, room) => all.filter((r) => !room || r.room === room).slice(-limit);
+  check('事件流：最近 3 条', log.readRecent({ limit: 3 }), naive(3));
+  check('事件流：跨天取 40 条', log.readRecent({ limit: 40 }), naive(40));
+  check('事件流：按房间筛', log.readRecent({ room: 'group:b', limit: 6 }), naive(6, 'group:b'));
+  check('事件流：要的比有的多', log.readRecent({ limit: 5000 }).length, all.length);
+
+  const longText = 'z'.repeat(200000);   // 一行比一次读的块还长
+  fs.appendFileSync(path.join(dir, 'events-2026-10-23.jsonl'), JSON.stringify({ eid: 'ev_long', ts: 1, room: 'group:long', text: longText }) + '\n');
+  const last = log.readRecent({ limit: 1 })[0];
+  check('事件流：超长行读得全', last?.eid === 'ev_long' && last.text.length === longText.length, true);
+
+  const since = new Date('2026-10-22T12:00:30').getTime();
+  const sinceNaive = all.filter((r) => r.ts >= since).length;
+  check('事件流：readSince 跳过旧的天', log.readSince(since).length, sinceNaive);
+  check('事件流：readSince 0 是全量', log.readSince(0).length, all.length + 1);
+  check('事件流：还没收过消息时不炸', new EventLog({ dir: path.join(dir, 'none') }).readRecent({ limit: 3 }), []);
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 // ── 结果 ────────────────────────────────────────────────

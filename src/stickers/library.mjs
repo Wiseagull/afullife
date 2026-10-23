@@ -36,7 +36,7 @@ const fingerprint = (file) => {
  * 直接报「声明是 png，内容不是」。所以存的时候按真身取名。
  * 猜不出就返回 null，让调用方退回按扩展名走。
  */
-const sniffExt = (file) => {
+export const sniffExt = (file) => {
   let b;
   try {
     b = Buffer.alloc(12);
@@ -224,13 +224,24 @@ export class StickerLibrary {
     return true;
   }
 
-  /** 按标签 / 情境词 / 有没有分过类 找。 */
-  search({ tags = [], text = '', unclassified = false, limit = 20, includePending = false } = {}) {
+  /** 记录在、图不在盘上（被手动删了 / 换机器没带过来） */
+  #present(it) {
+    try { return fs.existsSync(this.abs(it)); } catch { return false; }
+  }
+
+  /**
+   * 按标签 / 情境词 / 有没有分过类 找。
+   * `onlyPresent`：只给图还在的那些 —— 递给提示词时用。缺图的路径写进提示词，
+   * 她照着发只会撞上 send 那层的「图不在」直接不发，白占一个表情位。
+   * （记录本身还留着，doctor 的「缺文件」警告靠它。）
+   */
+  search({ tags = [], text = '', unclassified = false, limit = 20, includePending = false, onlyPresent = false } = {}) {
     const want = tags.map((t) => String(t).trim()).filter(Boolean);
     return this.all()
       .filter((it) => {
         if (!includePending && it.pending === true) return false;
         if (unclassified && it.tags.length) return false;
+        if (onlyPresent && !this.#present(it)) return false;
         if (want.length && !want.every((t) => it.tags.some((x) => x.includes(t) || t.includes(x)))) return false;
         if (text) {
           const hay = `${it.tags.join(' ')} ${it.when} ${it.from}`.toLowerCase();

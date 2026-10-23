@@ -1,7 +1,7 @@
 # 命令行小工具
 
 `scripts/` 里全是 `node scripts/xxx.mjs` 直接跑的小工具，没有安装步骤，也没有第三方依赖。
-共 22 个，按"什么时候会用到"分三类。要看某一个的具体参数，就跑 `node scripts/xxx.mjs --help`
+共 23 个，按"什么时候会用到"分三类。要看某一个的具体参数，就跑 `node scripts/xxx.mjs --help`
 或者不带参数跑一次——它们都会先印用法。
 
 ---
@@ -47,6 +47,7 @@
 
 | 命令 | 检查什么 |
 | --- | --- |
+| `node scripts/doctor.mjs` | 一次看完"装好了没、还活着没、数据有没有坏"：Node 版本、人格三份、桥与 SnowLuma 在不在、表情库账实、事件流大小、小本本用量，分正常/提示/警告/错误四档，有错误时退出码 1。`--json` 给机器读，`--no-net` 不连本机端口 |
 | `node scripts/selftest.mjs` | 129 项：房间与路由、分条、记忆装配、看图白名单、交接纸条 |
 | `node scripts/probe-gate.mjs` | 闸的用例表（什么放行、什么要先问） |
 | `node scripts/probe-social.mjs` | 群聊社交状态机与"听着/开口"的判定 |
@@ -56,4 +57,5 @@
 | `node scripts/probe-gate-live.mjs` | 真机联调闸（要 `config.local.json` 里填好 `brain.headless.cli`） |
 | `node scripts/probe-approve-live.mjs` | 真机联调"拦下来→问你→放行"这一圈 |
 
-CI 里跑的是前六个（自检那五个 + `check-secrets`），在 Windows 与 Linux 上各一遍。
+CI 里跑的是 `selftest`、`probe-gate`、`probe-social`、`probe-conflict`、`probe-rules`、`check-secrets`
+这六个（`doctor` 要连本机端口，用 `--no-net` 也能跑，但更适合装完/出事时手动敲），在 Windows 与 Linux 上各一遍。

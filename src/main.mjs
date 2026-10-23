@@ -15,6 +15,7 @@ import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
 import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { loadStore, samplesFor, voiceBlock } from './body/voice.mjs';
+import { personaNoteFor } from './body/persona-note.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
 import { setWorkspaceRoots, underWorkspace, allowImageRead } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
@@ -297,45 +298,8 @@ const debounce = new Debounce(cfg.debounceMs, (roomKey, msgs) => {
   queue.push(() => handleBatch(roomKey, msgs), roomKey, { priority: FG });
 });
 
-// 人格三层都从项目里的 persona/ 读，按场合拼进提示词：
-// core 每轮都带；group 只在群里带；self 每轮都带。
-const PERSONA_DIR = path.join(ROOT, 'persona');
-function personaOf(name) {
-  try { return fs.readFileSync(path.join(PERSONA_DIR, name), 'utf8').trim(); } catch { return ''; }
-}
-function personaNoteFor({ isGroup = false, isOwner = true } = {}) {
-  // 三层人设都由这里拼进提示词。核心卡以前以为“DSH 会按工作区 AGENTS.md 自动加载”，
-  // 但工作区搬进项目之后，那儿的 AGENTS.md 只有干活规矩，一个人设字都没有——
-  // 结果她一直没读到 core.md（2026-10-22 她自己翻出来的）。
-  //
-  // 2026-10-22 晚上（主人 m13170）：「core 能不能只针对主人号一个人，其他人不管私聊
-  // 还是群聊都要加载 group」——所以现在按“这话是谁说的”分：
-  //   主人：核心人设（+ 群里再补群聊手册） + 她自己那份
-  //   别人：只有群聊手册，再补一句“这不是先生”，把人设里的称呼关系彻底摘掉
-  const parts = [];
-  if (isOwner) {
-    const core = personaOf('core.md');
-    if (core) parts.push(`【核心人设】
-${core}`);
-  }
-  if (isGroup || !isOwner) {
-    const g = personaOf('group.md');
-    if (g) {
-      const head = isOwner ? '【群聊手册】' : '【对外的人设：跟主人以外的人说话用这份】';
-      parts.push(`${head}
-${g}`);
-    }
-  }
-  if (isOwner) {
-    const mine = personaOf('self.md');
-    if (mine) parts.push(`【我自己的部分】
-${mine}`);
-  } else {
-    parts.push('（眼前这个人不是先生本人。别叫他先生，也别把跟先生之间的称呼、约定往他身上套——对他客客气气、像个普通网友那样聊。）');
-  }
-  L('persona', isOwner ? (isGroup ? '主人 · 核心+群聊手册' : '主人 · 核心人设') : '对外人设（非主人）');
-  return parts.join(String.fromCharCode(10) + String.fromCharCode(10));
-}
+// 人格三层（core / group / self）怎么拼，见 src/body/persona-note.mjs。
+// 挪出去是为了能被 selftest 钉住：2026-10-22 那次「core 根本没进提示词」不该再悄悄发生。
 
 // 她平时说话的样例：别人的嘴改不了，自己的嘴能锚住。
 // 每轮现读（文件小），改了不用重启桥。
@@ -804,8 +768,8 @@ async function handleBatch(roomKey, msgs) {
   const names = selfNames();
   // 给每条编号：她想引着某句回的时候，就写 [[reply:2]] 指第 2 条
   msgs.forEach((m, i) => { m.idx = i + 1; });
-  // 手边有什么表情，摆出来她才想得起来用
-  const stickerLine = renderStickers(stickerLib.search({ limit: 8 }), cfg.sticker?.style);
+  // 手边有什么表情，摆出来她才想得起来用。onlyPresent：图不在的不摆（递过去也发不出去）
+  const stickerLine = renderStickers(stickerLib.search({ limit: 8, onlyPresent: true }), cfg.sticker?.style);
   const isGroup = last.kind === 'group';
   // 这句是不是冲我来的：@ 到了，或者提了我的名字/关键词
   const addressed = msgs.some(
@@ -847,11 +811,11 @@ async function handleBatch(roomKey, msgs) {
   const turnProfile = verdict.full || !chatProfile ? null : chatProfile;
   if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey) });
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey) });
   let prompt = sid
     ? buildFollowup(msgs, {
       delta, isGroup: asGroup, addressed, selfNames: names, stickerLine,
-      personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner }),
+      personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }),
       rules: verdict.full ? rulesText : '',
       usageLine: usageLineFor(roomKey),
       voice: voiceNoteFor(roomKey),

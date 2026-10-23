@@ -58,6 +58,11 @@ jobs:
       - name: 自检（房间、路由、分条、记忆装配）
         run: node scripts/selftest.mjs
 
+      # 刚 clone 的树上没 data/、没 config.local.json，doctor 这些只报「提示」；
+      # 真出了「错误」（Node 太旧、人格缺文件）它会以 1 退出，正好拦住。
+      - name: 总览自检（doctor，不连本机端口）
+        run: node scripts/doctor.mjs --no-net
+
       - name: 闸的用例表
         run: node scripts/probe-gate.mjs
 
