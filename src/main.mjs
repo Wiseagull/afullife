@@ -22,6 +22,7 @@ import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
 import { NotesStore } from './memory/notes.mjs';
 import { makeHandover } from './memory/handover.mjs';
+import { asidePrompt, describeDoing } from './body/aside.mjs';
 import { buildBackground, buildDelta, selfLines } from './memory/context.mjs';
 import { PendingStore } from './memory/pending.mjs';
 import { InterestStore } from './interests/store.mjs';
@@ -264,16 +265,22 @@ const worker = cfg.brain?.kind === 'headless'
 //   decideBrain —— 整理记忆 / 体检 / 写交接纸条：只读文字、吐 JSON，用便宜的就够；
 //   visionBrain —— 表情包筛选 / 打标签：要先 read_image 再看图，得用能看图的模型。
 // 都没配（null）就退回 worker 自己的模型，行为和以前一模一样。
-function withModel(base, model) {
+// 注意：这里收的是"取模型的函数"而不是模型本身——面板改了配置要立刻生效，
+// 不能把启动那一刻的值钉死在里面（2026-10-23 踩过：面板里换了看图模型，桥不重启就不认）。
+function withModel(base, pickModel) {
   if (!base) return base;
-  const pick = model && String(model.provider || '').trim() && String(model.model || '').trim() ? model : null;
-  if (!pick) return base;
-  return { run: (opts = {}) => base.run({ ...opts, model: pick }) };
+  return {
+    run: (opts = {}) => {
+      const m = pickModel();
+      const ok = m && String(m.provider || '').trim() && String(m.model || '').trim();
+      return ok ? base.run({ ...opts, model: m }) : base.run(opts);
+    },
+  };
 }
-const headlessCfg = cfg.brain?.headless || {};
-const decideBrain = withModel(worker, headlessCfg.decideModel);
+const slotModel = (name) => () => cfg.brain?.headless?.[name] || null;
+const decideBrain = withModel(worker, slotModel('decideModel'));
 // 看图那两个活要 read_image：worker 本来就走全量 profile（轻装那套工具少，没这工具），别在这儿换
-const visionBrain = withModel(worker, headlessCfg.visionModel);
+const visionBrain = withModel(worker, slotModel('visionModel'));
 
 let lastSeenTs = Date.now();
 // 每个房间「上一轮动过手没有」。只认上一轮——用 20 分钟窗口会让一次 web_fetch
@@ -310,8 +317,63 @@ function recordUsage(roomKey, result, kind = 'chat') {
 }
 
 const REMEMBER_RE = /(记住|记一下|记下|别忘了|remember)/i;
+
+// ── "我正在干活，他插了句话" ─────────────────────────────
+// 她一轮能干五六分钟（筛表情、翻文件、画图），这几分钟里主人说的话只能干等，
+// 看起来就是"她不说话了"（2026-10-23 主人定：主人的话优先，先回一句再说）。
+// 做法：她正在跑的时候他开口 → 另起一个很短、不带工具的脑，用她的人设回一句，
+// 原来那一轮不受打断，继续干完。
+const runningTurns = new Map();   // roomKey -> { startedAt, tools[], asideAt }
+const ASIDE_MIN_GAP = 120000;     // 同一间房两次"先回一句"至少隔两分钟
+const ASIDE_AFTER = 15000;        // 跑起来 15 秒以上才值得插一句（刚开跑就回，跟正常回话没差别）
+
+async function asideWhileBusy(roomKey, msg) {
+  try {
+    if (!msg || !isRoot(msg.from)) return null;
+    const run = runningTurns.get(roomKey);
+    if (!run) return null;                                  // 她没在跑，走正常流程
+    const now = Date.now();
+    if (now - run.startedAt < ASIDE_AFTER) return null;      // 刚开跑，等正常回话就行
+    if (run.asideAt && now - run.asideAt < ASIDE_MIN_GAP) return null;
+    run.asideAt = now;
+    const doing = describeDoing(run.tools);
+    const prompt = asidePrompt({
+      personaNote: personaNoteFor(false),
+      doing,
+      minutes: (now - run.startedAt) / 60000,
+      ownerText: oneLine(msg.text ?? ''),
+    });
+    const r = await brain.run({
+      prompt,
+      sessionId: null,                                       // 另起一个，别碰她手上那个会话
+      profile: cfg.brain?.headless?.chatProfile || null,
+    });
+    const text = String(r?.text ?? '').trim();
+    if (!text || /^(pass|\[silent\])$/i.test(text)) return null;
+    await say(msg, text);
+    L('aside', `${roomKey} 她在忙（${doing}），先回一句：${text.slice(0, 40)}`);
+    return text;
+  } catch (e) {
+    L('aside', `先回一句没发出去：${e?.message ?? e}`);
+    return null;
+  }
+}
+
 const debounce = new Debounce(cfg.debounceMs, (roomKey, msgs) => {
-  queue.push(() => handleBatch(roomKey, msgs), roomKey, { priority: FG });
+  // 排进队之前先看一眼：她在忙、且这批发话的是主人 → 当场先回一句
+  const fromOwner = msgs.length > 0 && msgs.some((m) => isRoot(m.from));
+  if (fromOwner && runningTurns.has(roomKey)) {
+    asideWhileBusy(roomKey, msgs[msgs.length - 1]).catch(() => {});
+  }
+  queue.push(async () => {
+    const run = { startedAt: Date.now(), tools: [], asideAt: 0 };
+    runningTurns.set(roomKey, run);
+    try {
+      return await handleBatch(roomKey, msgs);
+    } finally {
+      if (runningTurns.get(roomKey) === run) runningTurns.delete(roomKey);
+    }
+  }, roomKey, { priority: FG });
 });
 
 // 人格三层（core / group / self）怎么拼，见 src/body/persona-note.mjs。
@@ -950,6 +1012,12 @@ async function handleBatch(roomKey, msgs) {
     if (ev?.type === 'tool_call') {
       // 记一笔：这个房间在动手。下一轮就算他没明说，也知道还在同一条线上。
       lastRoundTouched.set(roomKey, true);
+      // 顺手记下她手上在干什么——他插话时那句"我在忙什么"就是从这儿来的
+      const run = runningTurns.get(roomKey);
+      if (run && run.tools.length < 12) {
+        const name = ev.name || ev.tool || ev.toolName || '';
+        if (name) run.tools.push(String(name));
+      }
       if (ackTimer) {
         clearTimeout(ackTimer);
         ackTimer = null;

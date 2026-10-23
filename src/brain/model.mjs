@@ -300,7 +300,11 @@ export function writeModelPatch(dir, want = {}, fileName = 'model-patch.yml') {
     const old = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
     if (old !== body) {
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(file, body, 'utf8');
+      // 必须原子写：直接覆盖的话，另一轮正在读这份 patch 的 CLI 会读到半截 YAML，
+      // 然后只吐一句 "MCP server ready" 就 exit 1（2026-10-23 查到的 distill 一直失败的真因）
+      const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(tmp, body, 'utf8');
+      fs.renameSync(tmp, file);
     }
   } catch {
     return null;   // 写不了就当没指定，别把回话也拖挂
