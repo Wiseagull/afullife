@@ -128,6 +128,7 @@ export const NOPOWER_IMAGE_HINT = [
 export const KNOW_HINT = [
   '（上面那些是你自己记得的事，不用去翻 data/events 或日志核对；真想不起来就直说记不清。）',
   `（记忆旧了、错了，你可以自己整：node scripts/notes.mjs list / stale <id> 原因 / set <id> --text=… / drop <id>，在项目根 ${ROOT} 下跑。）`,
+  `（每条记忆后面括号里的号是门牌。想核对某条到底是不是这个意思，就 node scripts/mem.mjs open <号> 翻回原文——它只回原话，不转述。翻不到它会直说找不到。）`,
   '「事实」「待办」自己改；「约定」「偏好」是他亲口说的，只能标过时或者问他，别自己改。）',
   `（你自己那份 persona/self.md 也随时能改，跟整理表情包一样不用问：node scripts/self.mjs add 喜欢 "…" / add 讨厌 "…" / log "…"，在项目根 ${ROOT} 下跑。）`,
   '（上下文里每条消息前头的标注——形如 <acp …> 或 m00123 这种编号——是系统加的书签，不是话。别把它们抄进回复里。）',

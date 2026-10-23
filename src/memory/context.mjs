@@ -18,6 +18,22 @@ export function roomTag(room, nameOf = null) {
   return room.startsWith('private:') ? `私聊${tail}` : `群${tail}`;
 }
 
+/**
+ * 门牌：这条记忆是从哪几条事件里捞出来的。
+ *
+ * 2026-10-23 加。以前只写结论不写出处，出了偏差没人能追 ——
+ * 摘要每句都对，但离原话越远越没法核对。带上号之后，
+ * 她说一句“我记得你说过 X”，可以顺手翻回原文看是不是这个意思
+ * （`node scripts/mem.mjs open <号>`，只回原文，不做转述）。
+ */
+export function refTag(n, max = 3) {
+  const src = Array.isArray(n?.source) ? n.source.filter(Boolean) : [];
+  if (!src.length) return '';
+  const head = src.slice(0, max).map((s) => String(s)).join(' ');
+  const more = src.length > max ? ` 等 ${src.length} 条` : '';
+  return `（据 ${head}${more}）`;
+}
+
 /** 这个房间看不看得见那个房间的东西 */
 export function canSee(cfg, viewer, source) {
   if (!source || source === viewer) return true;
@@ -110,7 +126,7 @@ export function buildBackground({
     blocks.push('（你记得的事）');
     for (const n of sorted.slice(0, limitNotes)) {
       const from = n.room && n.room !== roomKey ? `，来自${roomTag(n.room, nameOf)}` : '';
-      blocks.push(`- 「${n.kind}」${n.text}${from}`);
+      blocks.push(`- 「${n.kind}」${n.text}${from}${refTag(n)}`);
     }
   }
 

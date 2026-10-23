@@ -7,7 +7,7 @@ import { StickerLibrary } from '../src/stickers/library.mjs';
 import { openingMood, draftLines, shouldYield } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
 import { buildPrompt, buildTriggerLines } from '../src/body/prompt.mjs';
-import { selfLines, agoLabel } from '../src/memory/context.mjs';
+import { selfLines, agoLabel, refTag, buildBackground } from '../src/memory/context.mjs';
 import { SerialQueue } from '../src/body/queue.mjs';
 import { ROOT } from '../src/config.mjs';
 import { handoverPrompt, cleanHandover } from '../src/memory/handover.mjs';
@@ -249,6 +249,24 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('agoLabel：分钟', agoLabel(now - 5 * 60_000, now), '5 分钟前');
   const only = selfLines(events, room, 1, { now });
   check('limit 只留最近一条', only.includes('2 小时前你说过'), false);
+}
+
+// ── 门牌：记忆后面拖着的号 ───────────────────────────────
+{
+  check('refTag：一条', refTag({ source: ['ev_abc12345'] }), '（据 ev_abc12345）');
+  check('refTag：三条', refTag({ source: ['ev_a', 'ev_b', 'ev_c'] }), '（据 ev_a ev_b ev_c）');
+  check('refTag：超过三条只列三条', refTag({ source: ['ev_a', 'ev_b', 'ev_c', 'ev_d'] }), '（据 ev_a ev_b ev_c 等 4 条）');
+  check('refTag：没出处就不写', refTag({ source: [] }), '');
+  check('refTag：老条目没有 source 也不炸', refTag({}), '');
+  const dated = buildBackground({
+    cfg: { memory: { rooms: {} } },
+    roomKey: 'private:1',
+    events: [],
+    notes: [{ kind: '约定', text: '他要求叫他先生', room: null, source: ['ev_9717e7f0'], weight: 3 }],
+    nameOf: null,
+  });
+  check('背景里带出门牌', dated.includes('（据 ev_9717e7f0）'), true);
+  check('背景里还有那句话', dated.includes('他要求叫他先生'), true);
 }
 
 // ── 用量账本 ─────────────────────────────────────────────
