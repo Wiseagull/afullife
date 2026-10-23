@@ -479,6 +479,36 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('没给路径就当不给', !allowImageRead('read_image', {}, allowed));
 }
 
+
+// ── 口吻样例：从她自己的旧话里挑短的、像人话的 ────────────────
+// 人设漂走的机制是「照着最近的自己继续说」；把好的旧话钉在眼前就是解药。
+{
+  const { isSample, pickSamples, voiceBlock } = await import('../src/body/voice.mjs');
+  ok('短句能当样例', isSample('早呀 (˘ω˘)'));
+  ok('太长不要（小作文会把她带成小作文）', !isSample('x'.repeat(120)));
+  ok('带列表不要', !isSample('- 一二三'));
+  ok('带路径不要', !isSample('存在 data/art 里了呀'));
+  ok('带代码不要', !isSample('跑 `node x.mjs` 就行'));
+  const picked = pickSamples([
+    { dir: 'out', text: '早呀' },
+    { dir: 'in', text: '这是别人说的' },
+    { dir: 'out', text: '我先收工啦。' },
+    { dir: 'out', text: 'y'.repeat(200) },
+  ], { n: 2 });
+  ok('只挑她自己说的、且短', picked.length === 2 && picked.every((x) => x.length < 50));
+  ok('没有样例就不拼这一段', voiceBlock([]) === '');
+  ok('样例段落带标题', voiceBlock(['早呀']).includes('你平时说话的样子'));
+}
+
+// ── 回看时她自己的长回复只留开头 ────────────────────────────
+{
+  const long = 'z'.repeat(200);
+  const mine = renderTranscript([{ dir: 'out', name: '她', text: long }]);
+  const his = renderTranscript([{ dir: 'in', name: '他', text: long }]);
+  ok('自己的长话被截断', mine.includes('……（后面还说了一些）') && mine.length < 120);
+  ok('别人的长话不截', his.includes(long));
+}
+
 // ── 结果 ────────────────────────────────────────────────
 if (fails.length) {
   console.log(`✗ ${fails.length} 个失败 / ${pass} 个通过\n`);

@@ -89,6 +89,9 @@ export function renderTranscript(events) {
       : '';
     const files = Array.isArray(e.imageFiles) ? e.imageFiles.filter(Boolean) : [];
     let text = String(e.text ?? '');
+    // 她自己说过的长段落，回看时只留开头：
+    // 一是省 token，二是别让她照着“上一次的长回复”继续往下说（人设就是这么漂走的）
+    if (e.dir === 'out' && text.length > 80) text = `${text.slice(0, 80)}……（后面还说了一些）`;
     if (quote) text = text.replace(/\[引用\]/g, '');
     if (!files.length) return `${num}${who}: ${quote}${text.trim()}`;
     // 正文里原本只有一个 [图片] 占位，换成真实路径——她当场就能 read_image

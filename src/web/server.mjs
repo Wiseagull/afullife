@@ -7,6 +7,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { ROOT, notebookDir } from '../config.mjs';
 import { ensureToken, TOKEN_HEADER } from './token.mjs';
+import { pickSamples, loadSamples, saveSamples, voiceBlock } from '../body/voice.mjs';
 import { ensureSnowLuma } from '../snowluma/launch.mjs';
 import { isPortOpen } from '../snowluma/runtime.mjs';
 import { listToggleable, installPlugins, uninstallPlugins } from './plugins.mjs';
@@ -125,6 +126,7 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
   const port = Number(conf.port || 3220);
   // 人设住在项目里；工作区那几个名字是它们的硬链接（同一个文件，两个名字）
   const PERSONA_FILES = { core: 'core.md', group: 'group.md', self: 'self.md' };
+  const VOICE_SAMPLES = path.join(ROOT, 'data', 'voice-samples.json');
   const personaPath = (which = 'core') => path.join(ROOT, 'persona', PERSONA_FILES[which] || 'core.md');
   const localFile = path.join(ROOT, 'config.local.json');
 
@@ -401,6 +403,32 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
           ? await installPlugins([name], opts)
           : await uninstallPlugins([name], opts);
         return json(res, r.ok ? 200 : 500, r, origin);
+      }
+
+      // ── 口吻样例：把「她平时怎么说话」钉住 ──
+      // 人设漂走的机制是「照着最近的自己继续说」；这里挑几句短的旧话，
+      // 每轮摆在她眼前当锚（比在末尾写十句"说话自然点"有用）。
+      if (area === 'voice' && req.method === 'GET') {
+        const samples = loadSamples(VOICE_SAMPLES);
+        return json(res, 200, { ok: true, samples, block: voiceBlock(samples), file: VOICE_SAMPLES }, origin);
+      }
+
+      if (area === 'voice' && req.method === 'POST') {
+        const body = await readBody(req);
+        const action = String(body?.action || 'pick');
+        if (action === 'clear') {
+          try { fs.rmSync(VOICE_SAMPLES); } catch { /* 本来就没有 */ }
+          logger?.info?.('voice', '口吻样例清掉了');
+          return json(res, 200, { ok: true, samples: [] }, origin);
+        }
+        const n = Math.min(8, Math.max(1, Number(body?.n) || 5));
+        const days = Math.min(14, Math.max(1, Number(body?.days) || 3));
+        const list = events?.readRecent ? events.readRecent({ limit: 800 }) : [];
+        const picked = pickSamples(list, { n });
+        if (!picked.length) return json(res, 200, { ok: false, error: '这几天她说的都太长了，没挑出合适的' }, origin);
+        saveSamples(VOICE_SAMPLES, picked);
+        logger?.info?.('voice', `重挑了口吻样例 ${picked.length} 句`);
+        return json(res, 200, { ok: true, samples: picked, block: voiceBlock(picked) }, origin);
       }
 
       // ── 人设 ──
