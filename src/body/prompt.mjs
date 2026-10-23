@@ -15,9 +15,13 @@ function textOf(m) {
  */
 function textWithImages(m) {
   const files = Array.isArray(m?.imageFiles) ? m.imageFiles.filter(Boolean) : [];
-  if (!files.length) return textOf(m);
-  const body = String(m?.text ?? '').replace(/(\[图片\])+/g, '').replace(/\s+/g, ' ').trim();
-  const list = files.map((f, i) => `图片${i + 1}：${f}`).join('；');
+  const vids = Array.isArray(m?.videoFiles) ? m.videoFiles.filter(Boolean) : [];
+  if (!files.length && !vids.length) return textOf(m);
+  const body = String(m?.text ?? '').replace(/(\[图片\])+/g, '').replace(/(\[视频\])+/g, '').replace(/\s+/g, ' ').trim();
+  const list = [
+    ...files.map((f, i) => `图片${i + 1}：${f}`),
+    ...vids.map((f, i) => `视频${i + 1}：${f}`),
+  ].join('；');
   return `${body}${body ? ' ' : ''}（${list}）`;
 }
 
@@ -170,6 +174,18 @@ const USAGE_NOTE = '（这三个数记在 data/usage/，想看更细就 `node sc
 
 function usageBlock(usageLine) {
   return usageLine ? `【今天的量】${usageLine}${USAGE_NOTE}` : '';
+}
+
+/**
+ * 视频那一句：视频不像图能直接看，得抽帧。
+ * 只在她这一轮真收到视频时才拼，免得平时白占 token。
+ */
+export function videoHint() {
+  return [
+    '（视频1：…）那种就是真存下来的视频文件。你不能直接看，要看就自己抽帧：',
+    'ffmpeg -i <文件> -vf "fps=1" -frames:v 12 <临时目录>/f_%02d.jpg，抽完用 read_image 一张张看；',
+    '只听声音可以用 whisper 那套转写。抽完的帧记得清掉，别攒在盘里。',
+  ].join('');
 }
 
 export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null, usageLine = '', voice = '' }) {

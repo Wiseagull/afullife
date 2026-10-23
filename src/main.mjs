@@ -13,7 +13,7 @@ import { SelfDrafts } from './memory/selfdrafts.mjs';
 import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mjs';
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
-import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentImagesHint, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
+import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentImagesHint, videoHint, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { loadStore, samplesFor, voiceBlock } from './body/voice.mjs';
 import { personaNoteFor } from './body/persona-note.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
@@ -42,6 +42,7 @@ import os from 'node:os';
 import { watchParent } from './util/parent.mjs';
 import { startWeb } from './web/server.mjs';
 import { cleanupImages } from './media/cleanup.mjs';
+import { sniffImage, sniffVideo } from './media/sniff.mjs';
 import { StickerLibrary } from './stickers/library.mjs';
 import { isYes, isNo } from './util/yesno.mjs';
 import { auditReply } from './safety/audit.mjs';
@@ -345,15 +346,6 @@ function selfNames() {
   return [client.selfName, ...(cfg.group?.names || [])].filter(Boolean);
 }
 
-/** 看头几个字节认图片格式，认不出就 null（交给调用方兜底）。 */
-function sniffImage(buf) {
-  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
-  if (buf.length >= 4 && buf.subarray(0, 4).toString('latin1') === 'GIF8') return 'gif';
-  if (buf.length >= 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
-  return null;
-}
-
 /** 把一组图地址存到本地 —— 存不下的就跳过，不能因为一张图把消息丢了。 */
 async function saveImageUrls(urls, tag) {
   const dir = path.join(cfg.dataDir, 'images');
@@ -379,6 +371,44 @@ async function saveImageUrls(urls, tag) {
 
 async function saveImages(msg) {
   return saveImageUrls(msg.images, msg.msgId || Date.now());
+}
+
+/**
+ * 把视频存到本地。
+ *
+ * 为什么单独一套：图是 ≤5MB 的小东西，视频动辄几十上百 MB，得有个上限，
+ * 超了就只留地址不留文件（不至于一个视频把盘塞满）。
+ * 存下来只是给她一个能拿去做事的东西——她自己要看还得抽帧，那是 ffmpeg 的活。
+ */
+async function saveVideoUrls(urls, tag) {
+  const dir = path.join(cfg.dataDir, 'videos');
+  fs.mkdirSync(dir, { recursive: true });
+  const maxMb = Number(cfg.videos?.maxFileMb ?? 200);
+  const safeTag = String(tag ?? '').replace(/[^\w.-]/g, '_').slice(0, 60) || String(Date.now());
+  const files = [];
+  for (const [i, url] of urls.entries()) {
+    try {
+      // 有时候 QQ 给的直接是本机路径（同一个 SnowLuma 下来的文件），那就别再走网络
+      const local = /^https?:/i.test(url) ? null : (fs.existsSync(url) ? url : null);
+      const buf = local
+        ? fs.readFileSync(local)
+        : Buffer.from(await (await fetch(url, { signal: AbortSignal.timeout(120000) })).arrayBuffer());
+      if (!buf.length) { L('media', '视频是空的（可能没下下来），跳过'); continue; }
+      if (maxMb > 0 && buf.length > maxMb * 1024 * 1024) {
+        L('media', `视频 ${(buf.length / 1048576).toFixed(1)}MB 超过 ${maxMb}MB 上限，没存`);
+        continue;
+      }
+      const ext = sniffVideo(buf) || (url.match(/\.(mp4|mov|webm|mkv|flv)/i)?.[1] || 'mp4').toLowerCase();
+      const file = path.join(dir, `${safeTag}-${i}.${ext}`);
+      fs.writeFileSync(file, buf);
+      files.push(file);
+    } catch (err) { L('media', `视频存不下来：${err?.message ?? err}`); }
+  }
+  return files;
+}
+
+async function saveVideos(msg) {
+  return saveVideoUrls(msg.videos, msg.msgId || Date.now());
 }
 
 /** 直接从桥说话（不是"我"说的那种）—— 审批问答、报错都走这儿。 */
@@ -613,6 +643,15 @@ client.on('event', async (raw) => {
     }
   }
 
+  // 视频同样：先落盘再进事件流，路径跟着这条消息一起交给她
+  if (msg.videos?.length) {
+    const vfiles = await saveVideos(msg);
+    if (vfiles.length) {
+      msg.videoFiles = vfiles;
+      L('media', `${msg.room} 存下 ${vfiles.length} 个视频：${vfiles[0]}`);
+    }
+  }
+
   lastActivityAt = Date.now();
 
   // 带情绪的那几句摘成草稿：她不一定会自己想起来写 self.md（实测过），
@@ -633,6 +672,8 @@ client.on('event', async (raw) => {
     text: msg.text,
     images: msg.images,
     imageFiles: msg.imageFiles,
+    videos: msg.videos,
+    videoFiles: msg.videoFiles,
     at: msg.at,
     atMe: msg.atMe,
     replyId: msg.replyId || undefined,
@@ -836,6 +877,11 @@ async function handleBatch(roomKey, msgs) {
       .filter(Boolean)
       .map((f) => path.resolve(f)),
   );
+  // 这一批真有视频，才告诉她怎么抽帧（平时不拼，省 token）
+  const batchVideos = msgs.some((m) => Array.isArray(m.videoFiles) && m.videoFiles.length) ||
+    (Array.isArray(recent) && recent.some((e) => Array.isArray(e.videoFiles) && e.videoFiles.length));
+  if (batchVideos) prompt += String.fromCharCode(10) + videoHint();
+
   const fromOwnerEarly = isRoot(last.from);
   if (!fromOwnerEarly) {
     prompt += '\n\n' + NOPOWER_HINT;
@@ -1193,8 +1239,10 @@ if (worker) {
 
 // ── 收图清理：按天数 + 容量，删最旧的 ─────────────────────
 const imageDir = path.join(cfg.dataDir, 'images');
+const videoDir = path.join(cfg.dataDir, 'videos');
 const cleanImages = () => {
   try { cleanupImages(imageDir, cfg.images || {}, L); } catch (err) { L('media', `清理失败：${err?.message ?? err}`); }
+  try { cleanupImages(videoDir, cfg.videos || {}, L); } catch (err) { L('media', `清理视频失败：${err?.message ?? err}`); }
 };
 
 // 表情库满了也自己收：按用得多少排，用得最少的先删（图跟记录一起走，先留档）

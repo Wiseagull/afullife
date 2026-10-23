@@ -65,6 +65,11 @@ const DEFAULTS = {
     retainDays: 7,             // 留几天（0 = 不按天数删）
     maxMb: 2048,               // 目录总容量上限（MB）
   },
+  videos: {
+    retainDays: 7,             // 视频比图占地，默认同样留 7 天
+    maxMb: 4096,               // 整个 videos/ 目录的上限（MB）
+    maxFileMb: 200,            // 单个视频超过这个就不落盘，只留地址
+  },
   // 自由活动：给她一段自己的时间（看电脑、上网、想干嘛干嘛）
   freeTime: {
     // 没有 enabled 这个总开关：真正的开关是 auto.enabled（自己找时间醒）与面板上手动开一段。

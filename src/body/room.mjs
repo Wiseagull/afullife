@@ -54,6 +54,12 @@ export function normalizeEvent(raw, { selfId = '', selfNames = [] } = {}) {
       .map((s) => String(s?.data?.url || s?.data?.file || ''))
       .filter(Boolean)
     : [];
+  // 视频跟图一样：只留地址，落盘由 main 那边做（有时候 QQ 给的是 file，有时候是 url）
+  const videos = segments
+    ? segments.filter((s) => s?.type === 'video')
+      .map((s) => String(s?.data?.url || s?.data?.file || ''))
+      .filter(Boolean)
+    : [];
   const names = [selfNames].flat().filter(Boolean);
   const calledByName = names.some((n) => text.includes(n));
   const replySeg = segments ? segments.find((s) => s?.type === 'reply') : null;
@@ -68,6 +74,7 @@ export function normalizeEvent(raw, { selfId = '', selfNames = [] } = {}) {
     name,
     text,
     images,
+    videos,
     at: Number(raw.time || Math.floor(Date.now() / 1000)),
     atMe: atMe || calledByName,
     // 引用：只留被引用那条的 id，正文由调用方去历史里捞
@@ -88,15 +95,20 @@ export function renderTranscript(events) {
       ? `[引用 ${e.quoteName || '某人'}：${shortenQuote(e.quoteText)}] `
       : '';
     const files = Array.isArray(e.imageFiles) ? e.imageFiles.filter(Boolean) : [];
+    const vids = Array.isArray(e.videoFiles) ? e.videoFiles.filter(Boolean) : [];
     let text = String(e.text ?? '');
     // 她自己说过的长段落，回看时只留开头：
     // 一是省 token，二是别让她照着“上一次的长回复”继续往下说（人设就是这么漂走的）
     if (e.dir === 'out' && text.length > 80) text = `${text.slice(0, 80)}……（后面还说了一些）`;
     if (quote) text = text.replace(/\[引用\]/g, '');
-    if (!files.length) return `${num}${who}: ${quote}${text.trim()}`;
-    // 正文里原本只有一个 [图片] 占位，换成真实路径——她当场就能 read_image
-    text = text.replace(/(\[图片\])+/g, '').trim();
-    const list = files.map((f, i) => `图片${i + 1}：${f}`).join('；');
+    if (!files.length && !vids.length) return `${num}${who}: ${quote}${text.trim()}`;
+    // 正文里原本只有 [图片] / [视频] 占位，换成真实路径——图她当场能 read_image，
+    // 视频只能给她文件，怎么看得她自己拿 ffmpeg 抽帧（那是她的活，不是桥的）
+    text = text.replace(/(\[图片\])+/g, '').replace(/(\[视频\])+/g, '').trim();
+    const list = [
+      ...files.map((f, i) => `图片${i + 1}：${f}`),
+      ...vids.map((f, i) => `视频${i + 1}：${f}`),
+    ].join('；');
     return `${num}${who}: ${quote}${text}${text ? ' ' : ''}（${list}）`;
   }).join('\n');
 }
