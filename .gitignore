@@ -45,3 +45,7 @@ sd-auto-mask.py
 
 # 踩坑便签：装好之后自己和 bot 边跑边攒的，不进仓库（_模板.md 留着）
 procedures/_inbox.md
+
+# 踩坑卡片：写的是某台机器上的具体现象，不进仓库（模板留着）
+procedures/*.md
+!procedures/_模板.md

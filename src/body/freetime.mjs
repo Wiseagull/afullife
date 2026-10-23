@@ -381,6 +381,28 @@ export class FreeTime {
     // （他说「嗯」「继续」这种催她的话不算打断；群里别人说话、没叫她也不算。）
     const verdict = this.#yieldBecause(beatStart);
     const isTalk = !/^(<pass\s*\/?>|pass|<wait:\s*\d+\s*\/?>|<done\s*\/?>)$/i.test(text);
+
+    // 结束
+    //
+    // 她回 <done/> 就是"这段到此为止"，别再自作主张补一句"我先收工啦"——
+    // 每一段都以同一句话结尾，比不说话更像机器。只有她自己在 <done/>
+    // 前后真说了什么（比如"我去睡了"），才把那句发出去；他刚好在说话就也不发。
+    if (/<done\s*\/?>/i.test(text)) {
+      const said = text.replace(/<done\s*\/?>/gi, '').trim();
+      if (!said) {
+        this.#last = '她说这一段弄完了（没说话，安静结束）。';
+        return this.#finish('她说完了');
+      }
+      if (verdict.yield) {
+        this.#last = `她想说「${said.slice(0, 40)}」再收工，但他刚开口，这句不发了。`;
+        this.#log('free', `收工那句不发了：${verdict.why}`);
+        return this.#finish('她说完了');
+      }
+      this.#last = `她说完了：${said.slice(0, 60)}`;
+      await this.#say(said, { free: true });
+      return this.#finish('她说完了');
+    }
+
     if (isTalk && verdict.yield) {
       this.#draft = { text, why: 'turn', at: Date.now(), sentParts: [] };
       this.#swallowed += 1;
@@ -396,8 +418,7 @@ export class FreeTime {
 
     // 结束
     if (/<done\s*\/?>/i.test(text)) {
-      this.#last = '她说这一段弄完了。';
-      await this.#say('我先收工啦。', { free: true });
+      this.#last = '她说这一段弄完了（没说话）。';
       return this.#finish('她说完了');
     }
 
