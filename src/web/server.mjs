@@ -560,7 +560,17 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
     }
   });
 
-  server.on('error', (err) => logger?.warn?.('web', `监听失败：${err?.message ?? err}`));
+  // 端口被占，八成是**已经有一只桥在跑**（单例锁漏了、或者面板重启时旧的那只
+  // 没杀干净）。这种情况绝不能继续跑：两只桥同时连着 SnowLuma，同一句话会被
+  // 回两遍——2026-10-23 早上就这么撞过（旧的那只还在 3220 上，新的照常连了上去）。
+  // 所以这里直接退出，宁可没桥，也不要两只。
+  server.on('error', (err) => {
+    if (err?.code === 'EADDRINUSE') {
+      logger?.error?.('web', `端口 ${port} 被别人占着：多半已经有一只桥在跑，这次不起了（免得两只一起回话）`);
+      process.exit(1);
+    }
+    logger?.warn?.('web', `监听失败：${err?.message ?? err}`);
+  });
   server.listen(port, '127.0.0.1', () => {
     logger?.info?.('web', `面板接口 http://127.0.0.1:${port}/api/status`);
   });

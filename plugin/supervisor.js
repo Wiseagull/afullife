@@ -33,6 +33,19 @@ function kill(pid) {
   } catch { return false; }
 }
 
+/**
+ * 连子进程一起杀。
+ *
+ * 桥是 Electron 二进制带的 node，直接 /F 偶尔只杀掉外层、里面的 DSH 会话
+ * 还挂着端口（3220 就是这么被老进程占住的）。/T 会顺着进程树一起收。
+ */
+function killTree(pid) {
+  try {
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+    return true;
+  } catch { return false; }
+}
+
 function note(line) {
   try {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
@@ -116,7 +129,7 @@ export function stopBridge(handle) {
  * 新进程会以为"已经有一只"直接退出——桥就这么停在半路了。
  */
 export async function stopBridgeHard(handle, { gracefulMs = 4000 } = {}) {
-  const pid = handle?.child?.pid ?? readPid();
+  const pid = handle?.child?.pid ?? handle?.adoptedPid ?? readPid();
   if (!pid) return true;
   if (handle?.child && !handle.child.killed) {
     try { handle.child.kill(); } catch { /* 已经没了 */ }
@@ -125,12 +138,20 @@ export async function stopBridgeHard(handle, { gracefulMs = 4000 } = {}) {
   const until = Date.now() + gracefulMs;
   while (pidAlive(pid) && Date.now() < until) await sleep(200);
   if (pidAlive(pid)) {
-    note(`优雅停没停住（pid ${pid}），强杀`);
-    kill(pid);
-    const hard = Date.now() + 2500;
+    note(`优雅停没停住（pid ${pid}），强杀整棵进程树`);
+    killTree(pid);
+    const hard = Date.now() + 4000;
     while (pidAlive(pid) && Date.now() < hard) await sleep(150);
   }
+  // 关键：杀不掉的时候**别清 pid 文件**。
+  // 清了它，新起的那只就以为自己是唯一一只，照常连上 QQ —— 于是两只桥
+  // 同时在线，同一句回两遍（2026-10-23 早上就这么撞过一次）。
+  // 留着 pid 文件，新桥看到 "已经有一个在跑（pid …）" 会自己退出，至少只有一只。
+  if (pidAlive(pid)) {
+    note(`停不掉（pid ${pid}），pid 文件留着不让第二只起来`);
+    throw new Error(`停不掉旧的桥（pid ${pid}）：先别重启，否则会变成两只一起回话`);
+  }
   try { fs.unlinkSync(PID_FILE); } catch { /* 没有就算了 */ }
-  note(`桥已停（pid ${pid}${pidAlive(pid) ? '，仍然活着？！' : ''}）`);
-  return !pidAlive(pid);
+  note(`桥已停（pid ${pid}）`);
+  return true;
 }
