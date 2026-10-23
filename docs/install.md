@@ -123,8 +123,7 @@ cp config.example.json config.local.json
   "brain": {
     "kind": "headless",
     "headless": { "workspace": "D:/apps/afullife" }
-  },
-  "send": { "dryRun": false }
+  }
 }
 ```
 
@@ -136,8 +135,9 @@ cp config.example.json config.local.json
   - `headless`：每来一段话，起一个 DSH 跑一轮（推荐）
   - `none`：只收消息不说话。**第一次装建议先用 `none`**，确认能收到 QQ 消息，再换回 `headless`
 - **`brain.headless.workspace`** —— 她干活的工作目录，画图和临时文件都落这儿，一般就填项目目录
-- **`send.dryRun`** —— `true` 是"只打印不真发"。示例配置里故意是 `true`：
-  **第一次先留着**，等日志里能看见"准备发什么"了，再改成 `false`
+- **`send.dryRun`** —— `true` 是"只打印不真发"，**默认没有这一项**（等于 `false`，装上就真发）。
+  第一次不想让她真的开口，就自己加一行 `"send": { "dryRun": true }`，等日志里能看见
+  "准备发什么"了再删掉。之所以不写进模板：留着它忘了删的人，会以为她坏了。
 
 其余几十个参数（群聊接话概率、垫话、表情档位、自由活动、记忆房间开关）不用手写，
 首次运行自动生成，之后都能在面板里点。
@@ -342,11 +342,11 @@ persona/       core.md、group.md（仓库自带默认人设，改成你自己�
 3. `node scripts/find-snowluma.mjs "<SnowLuma 目录>"` → 期待输出里有 `✓ 找到 SnowLuma 了` 和
    `OneBot：ws://…`。报错就按它给的 `reason` 处理，别猜
 4. `cp config.example.json config.local.json`，填 `owner.userIds`（对方的 QQ 号）
-   和 `brain.headless.workspace`（项目目录）；`send.dryRun` 先留 `true`
+   和 `brain.headless.workspace`（项目目录）。想先不出声就自己加 `"send": { "dryRun": true }`
 5. 装面板：`node scripts/install-panel.mjs`（它会自己找到 desktop profile），
    然后请对方**把 DSH 完全关掉再打开**——这一步只能由人来做，你替他点了没用
 6. 先用前台跑一次 `node src/main.mjs`，确认出现 `[ready] 登录为 …`
-7. 让对方在 QQ 里发一句，日志里出现 `[in] private:…` 之后，再提醒他把 `send.dryRun` 改成 `false`
+7. 让对方在 QQ 里发一句，日志里出现 `[in] private:…` 之后，再确认 `send.dryRun` 是关着的（没加过就是关着）
 8. 需要的话，再到面板「工具」页勾选她的工具
 
 **别擅自动的东西**：`data/`、`persona/` 里的正式文件、以及对方没说要改的插件。
@@ -361,7 +361,7 @@ persona/       core.md、group.md（仓库自带默认人设，改成你自己�
 | 面板说「连不上桥」 | 桥没起来，点面板上的「重启桥」；还不行看 `data\logs\dsh-supervisor.log` |
 | 日志说「没找到 SnowLuma」 | 回第 2 步：没告诉它 SnowLuma 在哪，或者 SnowLuma 里还没登录过 QQ |
 | 一直不 `[ready]`，卡在「等太久了，端口还没通」 | SnowLuma 里没登录 QQ，或 3000/3001 端口没开、被占用 |
-| 私聊她不回 | `send.dryRun` 还是 `true`；或者端口没通（看上面那条） |
+| 私聊她不回 | 自己在配置里加了 `send.dryRun: true` 忘了删；或者端口没通（看上面那条） |
 | 她只肯聊天、不肯动手 | 说话的人不在 `owner.userIds` 里——设计如此，只有主人有动手权限 |
 | 回了但发不出去 | 日志里找 `[send]` 报错；`retcode 100/120` 是被 QQ 风控了 |
 | 第一条等很久 | 正常，3～8 秒；她在起一个 DSH 想事情 |
