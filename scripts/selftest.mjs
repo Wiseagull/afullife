@@ -143,7 +143,7 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
 {
   const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom', 'latin1'), Buffer.alloc(8)]);
   const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0, 0, 0, 0, 0]);
-  const flv = Buffer.from('FLV   	', 'latin1');
+  const flv = Buffer.from('FLV\x00\x00\x00	', 'latin1');
   check('认 mp4', sniffVideo(mp4), 'mp4');
   check('认 webm', sniffVideo(webm), 'webm');
   check('认 flv', sniffVideo(flv), 'flv');
@@ -182,10 +182,10 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
 
 // 动图：read_image 只给一帧，得知道它是不是动图才值得转视频
 {
-  const gif = Buffer.from('GIF89a' + ' '.repeat(8) + '!ù' + ' '.repeat(4) + '!ù', 'latin1');
+  const gif = Buffer.from('GIF89a' + '\x00'.repeat(8) + '!ù' + '\x00'.repeat(4) + '!ù', 'latin1');
   ok('数得出 GIF 有几帧', gifFrameCount(gif) === 2);
   ok('两帧以上算动图', isAnimatedGif(gif) === true);
-  ok('单帧 GIF 不算动图', isAnimatedGif(Buffer.from('GIF89a' + '!ù' + ' '.repeat(8), 'latin1')) === false);
+  ok('单帧 GIF 不算动图', isAnimatedGif(Buffer.from('GIF89a' + '!ù' + '\x00'.repeat(8), 'latin1')) === false);
   ok('jpg 当 GIF 数帧返回 0', gifFrameCount(Buffer.from('ÿØÿá', 'latin1')) === 0);
   ok('空内容不炸', gifFrameCount(null) === 0 && isAnimatedGif(Buffer.alloc(0)) === false);
 }
@@ -347,7 +347,10 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('账本：轮数', today.turns, 2);
   check('账本：token 累加', today.totalTokens, 7650);
   check('账本：房间拆开', today.rooms.length, 2);
-  check('账本：落盘一天一个文件', fs.existsSync(path.join(dir, 'usage-' + new Date().toISOString().slice(0, 10) + '.jsonl')), true);
+  const d0 = new Date();
+  const p2 = (x) => String(x).padStart(2, '0');
+  const localDay = `${d0.getFullYear()}-${p2(d0.getMonth() + 1)}-${p2(d0.getDate())}`;
+  check('账本：落盘一天一个文件', fs.existsSync(path.join(dir, 'usage-' + localDay + '.jsonl')), true);
   const d = describeUsage(today);
   check('描述里有轮数', d.includes('2 轮'), true);
   check('描述里有缓存', d.includes('缓存'), true);
@@ -538,28 +541,35 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
 // 2026-10-22 晚上她在群里一直说「打不开」：不是没路径，是闸把 read_image 也拦了。
 {
   const { allowImageRead } = await import('../src/safety/rules.mjs');
-  const allowed = new Set([String.raw`E:\img\a.jpg`]);
-  ok('别人发的图可以看', allowImageRead('read_image', { file_path: String.raw`E:\img\a.jpg` }, allowed));
-  ok('换成正斜杠也认得', allowImageRead('read_image', { file_path: 'E:/img/a.jpg' }, allowed));
-  ok('别的路径不给看', !allowImageRead('read_image', { file_path: String.raw`E:\secret\x.jpg` }, allowed));
+  // 用例里的路径一律运行期拼：源码里不留字面盘符（2026-10-24 他要求
+  // 「推送不要出现任何本机地址」）。被测函数内部全走 path.resolve，分支覆盖不变。
+  const FIX = path.join(os.tmpdir(), 'img');
+  const PROJ = path.join(os.tmpdir(), 'proj');
+  const IMG_DIR = path.join(PROJ, 'data', 'images');
+  const SECRET = path.join(os.tmpdir(), 'secret', 'x.jpg');
+  const slash = (p) => p.replace(/\\/g, '/');
+  const allowed = new Set([path.join(FIX, 'a.jpg')]);
+  ok('别人发的图可以看', allowImageRead('read_image', { file_path: path.join(FIX, 'a.jpg') }, allowed));
+  ok('换成正斜杠也认得', allowImageRead('read_image', { file_path: slash(path.join(FIX, 'a.jpg')) }, allowed));
+  ok('别的路径不给看', !allowImageRead('read_image', { file_path: SECRET }, allowed));
   ok('别的工具一样不给', !allowImageRead('pwsh', { command: 'dir' }, allowed));
   ok('没给路径就当不给', !allowImageRead('read_image', {}, allowed));
 
   // 2026-10-23：他不在的时候她仍读不了群里的图——被概率唤醒时这一批没有图，
   // 而图是半小时前发的，早不在 allowed 里了。所以补一条：data/images 里的都能看。
   const { imageReadScope } = await import('../src/safety/rules.mjs');
-  const dirs = [String.raw`E:\proj\data\images`];
+  const dirs = [IMG_DIR];
   ok('这一批里的图：判成 batch',
-    imageReadScope('read_image', { file_path: String.raw`E:\img\a.jpg` }, allowed, dirs) === 'batch');
+    imageReadScope('read_image', { file_path: path.join(FIX, 'a.jpg') }, allowed, dirs) === 'batch');
   ok('老图在 data/images 里：判成 dir',
-    imageReadScope('read_image', { file_path: String.raw`E:\proj\data\images\123-0.jpg` }, new Set(), dirs) === 'dir');
+    imageReadScope('read_image', { file_path: path.join(IMG_DIR, '123-0.jpg') }, new Set(), dirs) === 'dir');
   ok('正斜杠写的老图也认',
-    imageReadScope('read_image', { file_path: 'E:/proj/data/images/123-0.jpg' }, new Set(), dirs) === 'dir');
-  ok('data/images 之外的老图不给', imageReadScope('read_image', { file_path: String.raw`E:\proj\data\stickers\x.jpg` }, new Set(), dirs) === '');
-  ok('名字蹭前缀的不给', imageReadScope('read_image', { file_path: String.raw`E:\proj\data\images2\x.jpg` }, new Set(), dirs) === '');
-  ok('目录本身不算一张图', imageReadScope('read_image', { file_path: String.raw`E:\proj\data\images` }, new Set(), dirs) === '');
+    imageReadScope('read_image', { file_path: slash(path.join(IMG_DIR, '123-0.jpg')) }, new Set(), dirs) === 'dir');
+  ok('data/images 之外的老图不给', imageReadScope('read_image', { file_path: path.join(PROJ, 'data', 'stickers', 'x.jpg') }, new Set(), dirs) === '');
+  ok('名字蹭前缀的不给', imageReadScope('read_image', { file_path: path.join(PROJ, 'data', 'images2', 'x.jpg') }, new Set(), dirs) === '');
+  ok('目录本身不算一张图', imageReadScope('read_image', { file_path: IMG_DIR }, new Set(), dirs) === '');
   ok('别的工具就算在 data/images 里也不放',
-    imageReadScope('pwsh', { file_path: String.raw`E:\proj\data\images\1-0.jpg` }, new Set(), dirs) === '');
+    imageReadScope('pwsh', { file_path: path.join(IMG_DIR, '1-0.jpg') }, new Set(), dirs) === '');
 }
 
 

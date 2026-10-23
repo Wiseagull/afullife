@@ -32,11 +32,11 @@ export function setWorkspaceRoots(roots = []) {
 // 判断一个路径在不在白名单里。
 //
 // 2026-10-22 外部评审指出的洞：老实现是纯字符串前缀比较，
-// `data\..\..\..\Windows\System32\drivers\etc\hosts` 会被判成"在白名单内"。
+// `data/../../../Windows/System32/drivers/etc/hosts` 会被判成"在白名单内"。
 // 所以现在先 path.resolve 把 .. 摊平（相对路径以项目根为基准），
 // 存在的话再 realpath 一次，把 junction / 符号链接 / 8.3 短名也摊平，然后才比。
 // 路径判断要能跨平台：2026-10-22 CI 加了 windows-latest 之后发现，
-// 同一份用例在 Linux 上把 "C:\Windows\..." 当成"相对路径、在项目里"，
+// 同一份用例在 Linux 上把「盘符:\Windows\...」当成"相对路径、在项目里"，
 // 于是"写系统目录"被判成 note。闸的结论不该随跑在哪个系统而变。
 const WIN_ABS = /^[A-Za-z]:[\\/]/;
 const BACKSLASH = /\\/g;
@@ -173,7 +173,7 @@ export function imageReadScope(tool, input = {}, allowed = new Set(), dirs = [])
  * 两个路径是不是指同一个文件。
  *
  * 为什么要单独写：同一张图在三个地方会被写成三种样子——事件里存的是
- * `E:\...`，她调工具时常打成正斜杠 `E:/...`，而 `path.resolve` 在
+ * `<盘符>:\...`，她调工具时常打成正斜杠 `<盘符>:/...`，而 `path.resolve` 在
  * Windows 与 Linux 上对这两种写法的处理不一样（Linux 下反斜杠是普通字符，
  * 会整段被当成文件名）。所以先 resolve，再把反斜杠统一成正斜杠比一次。
  *
