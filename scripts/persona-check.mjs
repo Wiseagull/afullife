@@ -48,6 +48,7 @@ function selfWord() {
     if (!fs.existsSync(p)) continue;
     const t = fs.readFileSync(p, 'utf8');
     for (const m of t.matchAll(/(本[\u4e00-\u9fa5]{1,2})/g)) {
+      if (STOP_SELF.has(m[1])) continue;
       counts.set(m[1], (counts.get(m[1]) || 0) + 1);
     }
   }
