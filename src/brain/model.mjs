@@ -79,12 +79,16 @@ export function parseProviderTable(text) {
 
     const nameOnly = line.match(/^\s{6}([A-Za-z0-9._-]+):\s*$/);
     if (nameOnly) {
-      cur = { models: [] };
+      cur = { models: [], raw: [] };
       out[nameOnly[1]] = cur;
       inModels = false;
       continue;
     }
     if (!cur) continue;
+    // 原样留住整块：`models[].input`（能不能收图）、`reasoningEfforts`、`contextWindow`
+    // 这些我们没解析的字段都在这里，丢了就等于把她降级成"不会看图"
+    //（2026-10-23 的坑：借来的提供商被重新拼一遍，input 没了，read_image 直接被拒）
+    if (/^\s{8,}\S/.test(line)) cur.raw.push(line);
 
     if (/^\s{8}models:\s*$/.test(line)) { inModels = true; continue; }
 
@@ -264,6 +268,15 @@ export function writeModelPatch(dir, want = {}, fileName = 'model-patch.yml') {
     lines.push('- id: llm-pi-ai', '  name: "@deepseek-ai/dsh-llm-pi-ai"', '  config:', '    providers:');
     for (const id of ids) {
       const p = providers[id] || {};
+      lines.push(`      ${id}:`);
+      // 借来的那家：整块原样搬（连 input / reasoningEfforts 一起），只补它可能缺的 apiKeyEnv
+      if (Array.isArray(p.raw) && p.raw.length) {
+        if (!p.raw.some((l) => /^\s{8}apiKeyEnv:/.test(l))) {
+          lines.push(`        apiKeyEnv: ${p.apiKeyEnv || keyEnvName(id)}`);
+        }
+        lines.push(...p.raw);
+        continue;
+      }
       const api = API_KINDS.includes(p.api) ? p.api : 'openai-completions';
       lines.push(`      ${id}:`);
       lines.push(`        displayName: ${yamlStr(p.displayName || id)}`);
@@ -272,12 +285,17 @@ export function writeModelPatch(dir, want = {}, fileName = 'model-patch.yml') {
       lines.push(`        baseURL: ${yamlStr(p.baseURL || '')}`);
       const models = Array.isArray(p.models) ? p.models : [];
       const list = models
-        .map((m) => (typeof m === 'string' ? { id: m } : { id: (m && m.id) || '', name: m && m.name }))
+        .map((m) => (typeof m === 'string' ? { id: m } : { id: (m && m.id) || '', name: m && m.name, input: m && m.input }))
         .filter((m) => m.id);
       if (list.length) {
         lines.push('        models:');
         for (const m of list) {
           lines.push(`          - id: ${yamlStr(m.id)}`, `            name: ${yamlStr(m.name || m.id)}`);
+          // 自己加的那家也能声明"这台会看图"——不写就按 DSH 默认（只吃文字）
+          if (Array.isArray(m.input) && m.input.length) {
+            lines.push('            input:');
+            for (const t of m.input) lines.push(`              - ${yamlStr(t)}`);
+          }
         }
       }
     }

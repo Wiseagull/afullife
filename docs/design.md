@@ -207,12 +207,17 @@ notebook/tmp/        临时
 
 **「看图」不只是筛表情**：这一批消息里带图时，她那一轮也会临时换到「看图」这个槽位
 （`src/main.mjs` 的 `turnModel`，日志会打「这一轮带 N 张图，用看图槽位 …」）。
-以前这就是「她打不开图」的另一个原因：对话槽位填了个不收图的模型（比如某些中转站的
-模型），`read_image` 会先看模型声明的能力，不收就直接拒——
-`model "xxx" does not declare image input`，她只能回你「这轮不带眼睛」。
-所以：**对话想用便宜的中转站没问题，只要「看图」那格填一个真能收图的**。
-面板上「看图」那页的按钮叫「拿一张图试一下」，会真的打开一张表情图问她，收不收图一试就知道
-（只问「在的」看不出这件事，这正是当初判断错的根源）。
+所以对话可以用便宜的中转站，只要「看图」那格填一个真能收图的。
+
+> 2026-10-23 真踩过的坑：她说自己看不了图，我先赖到模型头上，其实**模型没问题**——
+> 是 `src/brain/model.mjs` 把借来的提供商整份重拼时，只认得 displayName/apiKeyEnv/api/baseURL
+> 和 models 的 id/name，**把 `models[].input: [text, image]` 和 `reasoningEfforts` 丢了**。
+> DSH 据此认为这台只吃文字，`read_image` 就回
+> `model "xxx" does not declare image input`。
+> 现在借来的那家整块原样搬（`parseProviderTable()` 保留 `raw` 行，`writeModelPatch()` 直接拼回去），
+> 自己加的也可以在面板里声明 `input`。
+> 判断「收不收图」只能拿真图试——`POST /api/model/test` 带 `slot: "vision"` 就是干这个的，
+> 光问一句「在的」永远看不出这件事。
 
 ### 想用别的模型？在 DSH 里加一次就够了
 
