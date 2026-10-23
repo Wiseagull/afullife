@@ -632,6 +632,39 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ── 模型（src/brain/model.mjs）───────────────────────────
+{
+  const { parseDefaultModel, writeModelPatch } = await import('../src/brain/model.mjs');
+  const fake = [
+    '- id: jobs',
+    '  name: x',
+    '- id: agent-default-model',
+    '  name: "@deepseek-ai/dsh-agent-default-model"',
+    '  config:',
+    '    provider: deepseek-official',
+    '    model: deepseek-flash',
+    '- id: llm-retry',
+  ].join('\n');
+  check('模型：能从 dump-config 里挑出默认 provider/model', parseDefaultModel(fake), { provider: 'deepseek-official', model: 'deepseek-flash' });
+  check('模型：没有那一块就返回空', parseDefaultModel('- id: jobs'), { provider: '', model: '' });
+  check('模型：注释行与引号也能认', parseDefaultModel([
+    '- id: agent-default-model',
+    '  # 这是注释',
+    '  config:',
+    "    provider: 'aicost'",
+    '    model: "claude-opus-5-5"',
+  ].join('\n')), { provider: 'aicost', model: 'claude-opus-5-5' });
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-model-'));
+  const f = writeModelPatch(dir, { provider: 'tokenrhythm', model: 'deepseek-v4.1-flash-1017' });
+  check('模型：写 patch 文件', Boolean(f && fs.existsSync(f)), true);
+  const body = f ? fs.readFileSync(f, 'utf8') : '';
+  check('模型：patch 里的 provider 对', /provider: tokenrhythm/.test(body), true);
+  check('模型：patch 里的 model 对', /model: deepseek-v4\.1-flash-1017/.test(body), true);
+  check('模型：不指定就不写 patch（用 profile 默认）', writeModelPatch(dir, {}), null);
+  check('模型：只填一半也不写', writeModelPatch(dir, { provider: 'aicost' }), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 // ── 结果 ────────────────────────────────────────────────
 if (fails.length) {
   console.log(`✗ ${fails.length} 个失败 / ${pass} 个通过\n`);

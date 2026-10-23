@@ -172,6 +172,24 @@ notebook/tmp/        临时
   想查更细的让她跑 `node scripts/usage.mjs`（一周：`node scripts/usage.mjs 7`）
 - 这里只做**可见性**，不做硬上限——要不要让她活跃、活跃到什么程度，由你决定
 
+### 她用什么模型：面板里换
+
+默认跟着 DSH 的 `headless` profile 走（没额外配置时是 `deepseek-official / deepseek-flash`）。
+面板「用量」页有一张「她用什么模型」的卡：
+
+- 读的是 profile 的真值（`dsh --profile headless --dump-config` 里 `agent-default-model` 那一段），
+  所以改过 profile 之后点「刷新」就是新的，不用回来改代码
+- 填了 `provider` + `model` 就存进 `config.local.json` 的 `brain.headless.model`；**不填就等于用 profile 默认**
+- 保存后不用重启桥：每轮起 headless 时现写一个 `data/model-patch.yml`，
+  用 `--patch` 叠在 profile 之上（所以它压过 profile 里那份）
+- 卡上「试一下」会真起一轮，把毫秒数和回答打出来——写错了会当场报
+  `NO_ADAPTER: no adapter registered for provider "xxx"`
+
+**能选哪些**：只有 profile 里装了适配器的才能用。默认的 `headless` profile 只带 deepseek
+（`llm-deepseek` / `llm-deepseek-account` / `llm-pi-ai`），所以填 `tokenrhythm`、`aicost`、`glm`
+这类名字会得到 `NO_ADAPTER`。想用别家，得像在 DSH 里加提供商那样，先给 headless 那个
+profile 装对应的适配器插件、把 key 存进 DSH 凭据，再来这里填。
+
 ### 省钱的三个杠杆（都实测过）
 
 1. **工具按需**：每轮先用桥里那套「像不像派活」的判断分档，闲聊走轻装 profile

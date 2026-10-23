@@ -574,6 +574,48 @@ window.__ModuleLoader__.load({
       const [rotateMsg, setRotateMsg] = useState('');
       const [handover, setHandover] = useState({ enabled: true, inner: true });
       const [handoverMsg, setHandoverMsg] = useState('');
+      // 模型：留空 = 跟 profile 默认。见 src/brain/model.mjs
+      const [model, setModel] = useState({ provider: '', model: '' });
+      const [modelInfo, setModelInfo] = useState(null);
+      const [modelMsg, setModelMsg] = useState('');
+      const [modelTest, setModelTest] = useState(null);
+      const [testing, setTesting] = useState(false);
+      const loadModel = () => api('/api/model')
+        .then((r) => {
+          setModelInfo(r);
+          if (r && r.chosen) setModel({ provider: r.chosen.provider || '', model: r.chosen.model || '' });
+        })
+        .catch(() => {});
+      const saveModel = async (next) => {
+        const want = next || model;
+        setModelMsg('');
+        setModelTest(null);
+        try {
+          const pair = (want.provider || '').trim() && (want.model || '').trim()
+            ? { provider: want.provider.trim(), model: want.model.trim() }
+            : null;
+          await api('/api/config', { method: 'POST', body: JSON.stringify({ brain: { headless: { model: pair } } }) });
+          setModelMsg(pair ? '存好了，下一句就用它' : '存好了，回到 profile 默认');
+          await loadModel();
+        } catch (e) {
+          setModelMsg('没存上：' + e.message);
+        }
+      };
+      const testModel = async () => {
+        setTesting(true);
+        setModelTest(null);
+        try {
+          const r = await api('/api/model/test', {
+            method: 'POST',
+            body: JSON.stringify({ provider: (model.provider || '').trim(), model: (model.model || '').trim() }),
+          });
+          setModelTest(r);
+        } catch (e) {
+          setModelTest({ ok: false, error: e.message });
+        } finally {
+          setTesting(false);
+        }
+      };
       const saveHandover = async (patch) => {
         const next = Object.assign({}, handover, patch);
         setHandover(next);
@@ -617,7 +659,7 @@ window.__ModuleLoader__.load({
           if (r && r.currency) setCurrency(r.currency);
         })
         .catch((e) => setErr(e.message));
-      useEffect(() => { load(); loadRotate(); }, []);
+      useEffect(() => { load(); loadRotate(); loadModel(); }, []);
       const savePrice = async () => {
         setSaving(true);
         setPriceMsg('');
@@ -747,6 +789,52 @@ window.__ModuleLoader__.load({
             ),
             handoverMsg ? h('div', { style: S.tiny }, handoverMsg) : null,
           ),
+        ),
+        // ── 她用什么模型 ──
+        h('div', { style: { marginTop: 14, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,.08)' } },
+          h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, '她用什么模型'),
+          h('div', { style: S.tiny },
+            '留空两格 = 跟 DSH 那个 headless profile 的默认。填了就在每轮起进程时叠一层 patch，不动你 profile 目录里的文件。'),
+          modelInfo && modelInfo.profile
+            ? h('div', { style: S.tiny },
+              '这个 profile 的默认：' + modelInfo.profile.provider + ' / ' + modelInfo.profile.model)
+            : null,
+          modelInfo && modelInfo.profileError
+            ? h('div', { style: S.tiny }, '读不到 profile 默认：' + modelInfo.profileError)
+            : null,
+          modelInfo && modelInfo.chosen
+            ? h('div', { style: S.tiny }, '现在生效：' + modelInfo.chosen.provider + ' / ' + modelInfo.chosen.model + '（面板指定的）')
+            : h('div', { style: S.tiny }, '现在生效：跟 profile 默认一样'),
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+            h('input', {
+              value: model.provider,
+              placeholder: 'provider，如 deepseek-official',
+              list: 'qad-provider-hints',
+              style: { ...S.input, width: 200 },
+              onChange: (e) => setModel({ ...model, provider: e.target.value }),
+            }),
+            h('datalist', { id: 'qad-provider-hints' },
+              ((modelInfo && modelInfo.providers) || []).map((p) => h('option', { key: p, value: p })),
+            ),
+            h('input', {
+              value: model.model,
+              placeholder: 'model，如 deepseek-flash',
+              style: { ...S.input, width: 220 },
+              onChange: (e) => setModel({ ...model, model: e.target.value }),
+            }),
+            h('button', { style: S.btn(false), onClick: () => saveModel() }, '保存'),
+            h('button', { style: S.btn(testing), onClick: testModel }, testing ? '试跑中…' : '试一下'),
+            h('button', { style: S.btn(false), onClick: () => { const empty = { provider: '', model: '' }; setModel(empty); saveModel(empty); } }, '恢复默认'),
+          ),
+          modelMsg ? h('div', { style: S.tiny }, modelMsg) : null,
+          modelTest
+            ? h('div', { style: S.tiny },
+              modelTest.ok
+                ? '试跑成功（' + modelTest.ms + 'ms）：' + (modelTest.text || '（空回答）')
+                : '试跑失败（' + (modelTest.ms || 0) + 'ms）：' + (modelTest.error || '未知错误'))
+            : null,
+          h('div', { style: S.tiny },
+            '注意：能用的 provider 取决于这个 profile 装了哪些适配器。写错了她下一句会回 NO_ADAPTER / MISSING_CREDENTIAL —— 先点「试一下」。'),
         ),
       );
     }

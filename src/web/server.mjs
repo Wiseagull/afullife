@@ -14,10 +14,16 @@ import { listToggleable, installPlugins, uninstallPlugins } from './plugins.mjs'
 import { roomView } from '../memory/context.mjs';
 import { HeadlessBrain } from '../brain/headless.mjs';
 import { SELF_INSTRUCTION } from '../body/prompt.mjs';
+import { readProfileModel } from '../brain/model.mjs';
+import { createBrain } from '../brain/index.mjs';
+import { dshDefaults } from '../brain/headless.mjs';
 
 const ORIGIN_OK = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 
 /** 允许从面板改的配置路径。改不了的（要重启才算数的）会标出来。 */
+// 面板里给个下拉建议：这几家是 DSH 常见 provider（名字错了她会回 MISSING_CREDENTIAL）
+const PROVIDER_HINTS = ['deepseek-official', 'aicost', 'tokenrhythm', 'custom', 'chatgpt-sub', 'google-sub', 'openai'];
+
 const EDITABLE = [
   'group.enabled',
   'group.speakOnAt',
@@ -28,6 +34,7 @@ const EDITABLE = [
   'debounceMs',
   'brain.headless.chatProfile',
   'brain.headless.rotateAtTokens',
+  'brain.headless.model',
   'brain.headless.handover',
   'ack',
   'send.split',
@@ -130,6 +137,9 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
   const personaPath = (which = 'core') => path.join(ROOT, 'persona', PERSONA_FILES[which] || 'core.md');
   const localFile = path.join(ROOT, 'config.local.json');
 
+  // profile 默认模型要跑一次 CLI 才知道，跑一次缓存住
+  let profileModel = null;
+
   const server = http.createServer(async (req, res) => {
     const origin = req.headers.origin;
     const hasOrigin = Boolean(origin);
@@ -189,6 +199,58 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
         return json(res, r.ok ? 200 : 400, r, origin);
       }
       // ── 配置 ──
+      // ── 模型：现在用哪个、profile 默认是哪个 ──
+      // 试一下这个模型能不能真跑通（会真起一轮，问一句话，几秒钟）
+      if (area === 'model' && req.method === 'POST' && id === 'test') {
+        const body = await readBody(req);
+        const provider = String(body?.provider || '').trim();
+        const model = String(body?.model || '').trim();
+        if (!provider || !model) return json(res, 400, { error: 'provider 和 model 都得填' }, origin);
+        const h = cfg.brain?.headless || {};
+        const d = dshDefaults();
+        const probe = createBrain({
+          brain: {
+            kind: 'headless',
+            headless: {
+              node: h.node || d.node,
+              cli: h.cli || d.cli,
+              profile: h.profile || d.profile || 'headless',
+              ...h,
+              model: { provider, model },
+              timeoutMs: 60000,
+            },
+          },
+        }, (tag, msg) => logger?.info?.(tag, msg));
+        const t0 = Date.now();
+        try {
+          const r = await probe.run({ prompt: '只回两个字：在的' });
+          return json(res, 200, { ok: true, ms: Date.now() - t0, text: String(r?.text || '').slice(0, 80) }, origin);
+        } catch (e) {
+          return json(res, 200, { ok: false, ms: Date.now() - t0, error: String(e?.message || e).slice(0, 400) }, origin);
+        }
+      }
+
+      if (area === 'model' && req.method === 'GET') {
+        const h = cfg.brain?.headless || {};
+        if (!profileModel || url.searchParams.get('refresh') === '1') {
+          const d = dshDefaults();
+          profileModel = readProfileModel({
+            node: h.node || d.node,
+            cli: h.cli || d.cli,
+            profile: h.profile || d.profile || 'headless',
+          });
+        }
+        return json(res, 200, {
+          ok: true,
+          chosen: h.model && h.model.provider && h.model.model ? { provider: h.model.provider, model: h.model.model } : null,
+          profile: profileModel && profileModel.provider
+            ? { provider: profileModel.provider, model: profileModel.model }
+            : null,
+          profileError: profileModel && profileModel.error ? String(profileModel.error) : null,
+          providers: PROVIDER_HINTS,
+        }, origin);
+      }
+
       if (area === 'config' && req.method === 'GET') {
         const out = {};
         for (const p of EDITABLE) setPath(out, p, getPath(cfg, p));

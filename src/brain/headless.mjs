@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ROOT } from '../config.mjs';
+import { writeModelPatch } from './model.mjs';
 
 /**
  * 默认从"正在跑我自己的这个进程"推：
@@ -41,6 +42,9 @@ const DEFAULTS = {
   profile: 'headless',
   // 空 = 不换，始终用上面那套；填了就是「闲聊用的轻装 profile」
   chatProfile: '',
+  // 用哪个模型：{ provider, model }。空就用 profile 自己的默认（agent-default-model）。
+  // 选了就写一份 patch 用 --patch 叠上去，见 src/brain/model.mjs 顶上那段。
+  model: null,
   // 默认就在项目自己目录里干活：她画的东西、写的文件都落在这儿，不散到别的工作区
   workspace: ROOT,
   timeoutMs: 120000,
@@ -50,6 +54,11 @@ const DEFAULTS = {
   // 这里给足权限，安全交给桥里的闸——headless 是非交互的，遇到要审批的动作会直接拒
   permissionMode: 'danger-full-access',
 };
+
+/** 给别的模块用：这套默认从哪来的（面板要读 profile 默认模型，得知道 node / cli）。 */
+export function dshDefaults() {
+  return { node: DEFAULTS.node, cli: DEFAULTS.cli, profile: DEFAULTS.profile };
+}
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-9;]*m/g;
@@ -108,7 +117,13 @@ export class HeadlessBrain {
       );
     }
     // 按轮换 profile：闲聊用轻的那套（工具少，每步省两万 token），要动手才用全量
-    const args = [this.cfg.cli, profile || this.cfg.profile, '--json'];
+    const args = [this.cfg.cli];
+    // 指定了模型就先叠一层 patch。注意：带 --patch 时 profile 必须用 --profile 显式给，
+    // 写成位置参数（dsh --patch x headless）会被拒：--profile <name> is required。
+    const patch = writeModelPatch(path.join(ROOT, 'data'), this.cfg.model || {});
+    const prof = profile || this.cfg.profile;
+    if (patch) args.push('--patch', patch, '--profile', prof, '--json');
+    else args.push(prof, '--json');
     if (sessionId) args.push('--session-id', sessionId);
     args.push('-');
 

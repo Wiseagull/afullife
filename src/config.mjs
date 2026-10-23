@@ -134,6 +134,9 @@ const DEFAULTS = {
       // 一轮有几步，每步都要把整段历史重看一遍——会话越长越贵，所以要定期换。
       // 0 或负数 = 不换。
       rotateAtTokens: 60000,
+      // 用哪个模型：{ provider, model }。留空（或 null）= 跟 DSH 那个 profile 的默认。
+      // 填了就在起进程时用 --patch 叠一层，不改你 profile 目录里的文件。面板「用量」页能改。
+      model: null,
       // 换会话时，让旧会话把这段"过程"写成一张交接纸条，落进记忆。
       // 不加这条也能用（靠 events 和记忆条目），加了新会话就知道刚才在忙什么。
       handover: {
