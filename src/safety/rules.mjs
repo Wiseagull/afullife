@@ -140,5 +140,26 @@ export function allowImageRead(tool, input = {}, allowed = new Set()) {
   if (tool !== 'read_image') return false;
   const want = String(input?.file_path ?? input?.path ?? '');
   if (!want) return false;
-  return allowed.has(path.resolve(want));
+  const w = path.resolve(want);
+  for (const a of allowed) {
+    if (samePath(w, path.resolve(String(a)))) return true;
+  }
+  return false;
+}
+
+/**
+ * 两个路径是不是指同一个文件。
+ *
+ * 为什么要单独写：同一张图在三个地方会被写成三种样子——事件里存的是
+ * `E:\...`，她调工具时常打成正斜杠 `E:/...`，而 `path.resolve` 在
+ * Windows 与 Linux 上对这两种写法的处理不一样（Linux 下反斜杠是普通字符，
+ * 会整段被当成文件名）。所以先 resolve，再把反斜杠统一成正斜杠比一次。
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function samePath(a, b) {
+  if (a === b) return true;
+  return a.replace(/\\/g, '/') === b.replace(/\\/g, '/');
 }
