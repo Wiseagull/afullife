@@ -17,7 +17,7 @@ import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentIma
 import { loadStore, samplesFor, voiceBlock } from './body/voice.mjs';
 import { personaNoteFor } from './body/persona-note.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
-import { setWorkspaceRoots, underWorkspace, allowImageRead, imageReadScope } from './safety/rules.mjs';
+import { setWorkspaceRoots, underWorkspace, imageReadScope } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
 import { NotesStore } from './memory/notes.mjs';
