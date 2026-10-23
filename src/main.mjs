@@ -260,6 +260,21 @@ const worker = cfg.brain?.kind === 'headless'
     }, L)
   : null;
 
+// 后台活按"这一轮干的是什么"分两种脑子（2026-10-23 主人要的）：
+//   decideBrain —— 整理记忆 / 体检 / 写交接纸条：只读文字、吐 JSON，用便宜的就够；
+//   visionBrain —— 表情包筛选 / 打标签：要先 read_image 再看图，得用能看图的模型。
+// 都没配（null）就退回 worker 自己的模型，行为和以前一模一样。
+function withModel(base, model) {
+  if (!base) return base;
+  const pick = model && String(model.provider || '').trim() && String(model.model || '').trim() ? model : null;
+  if (!pick) return base;
+  return { run: (opts = {}) => base.run({ ...opts, model: pick }) };
+}
+const headlessCfg = cfg.brain?.headless || {};
+const decideBrain = withModel(worker, headlessCfg.decideModel);
+// 看图那两个活要 read_image：worker 本来就走全量 profile（轻装那套工具少，没这工具），别在这儿换
+const visionBrain = withModel(worker, headlessCfg.visionModel);
+
 let lastSeenTs = Date.now();
 // 每个房间「上一轮动过手没有」。只认上一轮——用 20 分钟窗口会让一次 web_fetch
 // 把后面半小时全判成干活，闲聊就永远回到精简体。
@@ -776,7 +791,7 @@ async function handleBatch(roomKey, msgs) {
     // 旧会话已经 clear 了，跑它不会跟新会话抢同一条 session。
     if (hcfg.enabled !== false) {
       bgQueue.push(() => makeHandover({
-        brain,
+        brain: decideBrain,
         sessionId: oldSid,
         roomKey,
         roomName: roomNames.nameOf(roomKey),
@@ -1177,12 +1192,12 @@ async function rerunApproved(a) {
 async function runUpkeep() {
   if (!worker) return null;
   try {
-    const r = await upkeep({ brain: worker, notes, pending, logger: L });
+    const r = await upkeep({ brain: decideBrain, notes, pending, logger: L });
     // 先把候选过一遍眼：像不像表情，看图说话，不按文件大小判
-    const scored = await screenStickers({ brain: worker, stickers: stickerLib, logger: L, maxOps: 4 });
+    const scored = await screenStickers({ brain: visionBrain, stickers: stickerLib, logger: L, maxOps: 4 });
     if (scored.checked) L('sticker', `筛了 ${scored.checked} 张：收 ${scored.kept} / 退 ${scored.rejected} / 跳过 ${scored.skipped}`);
     // 收下的那些如果还没标签，按当时的语境补
-    await upkeepStickers({ brain: worker, stickers: stickerLib, logger: L });
+    await upkeepStickers({ brain: visionBrain, stickers: stickerLib, logger: L });
     return r;
   } catch (err) {
     L('upkeep', `异常：${err?.message ?? err}`);
@@ -1194,7 +1209,7 @@ async function runUpkeep() {
 async function runDistill() {
   if (!worker) return null;
   try {
-    return await distill({ brain: worker, notes, events, cursorFile, pending, logger: L });
+    return await distill({ brain: decideBrain, notes, events, cursorFile, pending, logger: L });
   } catch (err) {
     L('distill', `异常：${err?.message ?? err}`);
     return null;

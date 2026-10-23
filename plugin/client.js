@@ -753,8 +753,18 @@ window.__ModuleLoader__.load({
 
     // ── 模型：她现在用的是哪个，能不能换 ─────────────────────────────────
     function ModelTab() {
-      // 模型：留空 = 跟 profile 默认。见 src/brain/model.mjs
-      const [model, setModel] = useState({ provider: '', model: '' });
+      // 三个槽位：对话 / 决策 / 看图。各自留空 = 跟 profile 默认（后两个也留空 = 跟对话一样）。
+      // 见 src/brain/model.mjs 与 src/brain/headless.mjs 的 run({ model })
+      const EMPTY = { provider: '', model: '' };
+      const SLOTS = [
+        ['chat', '对话', '她跟你说话用这个。留空 = 跟 DSH 那个 profile 的默认。'],
+        ['decide', '决策', '整理记忆、体检、写交接纸条用这个——只读文字吐 JSON，用便宜的就够。留空 = 跟对话一样。'],
+        ['vision', '看图', '表情包筛选、给表情打标签用这个——要先打开图看，得是能看图的模型。留空 = 跟对话一样。'],
+      ];
+      const [active, setActive] = useState('chat');
+      const [slots, setSlots] = useState({ chat: { ...EMPTY }, decide: { ...EMPTY }, vision: { ...EMPTY } });
+      const model = slots[active] || EMPTY;
+      const setModel = (next) => setSlots((s) => ({ ...s, [active]: next }));
       const [modelInfo, setModelInfo] = useState(null);
       const [modelMsg, setModelMsg] = useState('');
       const [modelTest, setModelTest] = useState(null);
@@ -762,7 +772,9 @@ window.__ModuleLoader__.load({
       const loadModel = () => api('/api/model')
         .then((r) => {
           setModelInfo(r);
-          if (r && r.chosen) setModel({ provider: r.chosen.provider || '', model: r.chosen.model || '' });
+          const s = (r && r.slots) || {};
+          const one = (v) => ({ provider: (v && v.provider) || '', model: (v && v.model) || '' });
+          setSlots({ chat: one(s.chat || r?.chosen), decide: one(s.decide), vision: one(s.vision) });
         })
         .catch(() => {});
       const saveModel = async (next) => {
@@ -773,8 +785,12 @@ window.__ModuleLoader__.load({
           const pair = (want.provider || '').trim() && (want.model || '').trim()
             ? { provider: want.provider.trim(), model: want.model.trim() }
             : null;
-          await api('/api/config', { method: 'POST', body: JSON.stringify({ brain: { headless: { model: pair } } }) });
-          setModelMsg(pair ? '存好了，下一句就用它' : '存好了，回到 profile 默认');
+          const key = active === 'decide' ? 'decideModel' : active === 'vision' ? 'visionModel' : 'model';
+          await api('/api/config', { method: 'POST', body: JSON.stringify({ brain: { headless: { [key]: pair } } }) });
+          const label = (SLOTS.find((s) => s[0] === active) || [])[1] || active;
+          setModelMsg(pair
+            ? `存好了，「${label}」这一路下一轮就用它`
+            : `存好了，「${label}」回到${active === 'chat' ? ' profile 默认' : '跟对话一样'}`);
           await loadModel();
         } catch (e) {
           setModelMsg('没存上：' + e.message);
@@ -799,6 +815,31 @@ window.__ModuleLoader__.load({
       return h('div', null,
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
           h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, '她用什么模型'),
+          // 三个槽位：点哪个调哪个，下面的输入框和「你 DSH 里已经配好的」都作用于当前这个
+          h('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
+            SLOTS.map(([k, label]) => {
+              const on = active === k;
+              const set = slots[k] || EMPTY;
+              return h('button', {
+                key: k,
+                type: 'button',
+                onClick: () => { setActive(k); setModelMsg(''); setModelTest(null); },
+                title: set.provider && set.model
+                  ? `${set.provider} / ${set.model}`
+                  : (k === 'chat' ? '跟 profile 默认' : '跟对话一样'),
+                style: {
+                  padding: '5px 14px', borderRadius: 999, fontSize: 12, fontFamily: 'inherit',
+                  cursor: 'pointer', transition: 'all .15s',
+                  border: '1px solid ' + (on ? 'var(--dsh-color-accent, #4c8dff)' : 'rgba(76,141,255,.45)'),
+                  background: on ? 'var(--dsh-color-accent, #4c8dff)' : 'transparent',
+                  color: on ? '#fff' : 'inherit',
+                  fontWeight: on ? 600 : 500,
+                },
+              }, label + (set.provider && set.model ? ' ·' : ''));
+            }),
+            ),
+          h('div', { style: { ...S.tiny, marginBottom: 4 } },
+            (SLOTS.find((s) => s[0] === active) || [])[2] || ''),
           h('div', { style: S.tiny },
             '留空两格 = 跟 DSH 那个 headless profile 的默认。填了就在每轮起进程时叠一层 patch，不动你 profile 目录里的文件。'),
           modelInfo && modelInfo.profile
@@ -808,9 +849,14 @@ window.__ModuleLoader__.load({
           modelInfo && modelInfo.profileError
             ? h('div', { style: S.tiny }, '读不到 profile 默认：' + modelInfo.profileError)
             : null,
-          modelInfo && modelInfo.chosen
-            ? h('div', { style: S.tiny }, '现在生效：' + modelInfo.chosen.provider + ' / ' + modelInfo.chosen.model + '（面板指定的）')
-            : h('div', { style: S.tiny }, '现在生效：跟 profile 默认一样'),
+          h('div', { style: S.tiny },
+            ['现在生效 —— 对话：', '决策：', '看图：'].map((label, i) => {
+              const v = [modelInfo && modelInfo.slots && modelInfo.slots.chat,
+                modelInfo && modelInfo.slots && modelInfo.slots.decide,
+                modelInfo && modelInfo.slots && modelInfo.slots.vision][i];
+              const txt = v && v.provider ? `${v.provider} / ${v.model}` : (i === 0 ? '跟 profile 默认一致' : '跟对话一样');
+              return label + txt;
+            }).join('；')),
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
             h('input', {
               value: model.provider,

@@ -143,8 +143,14 @@ const DEFAULTS = {
       // 形状：{ <id>: { displayName, api, baseURL, apiKey|apiKeyRef, models: [{id,name}] } }
       providers: {},
       // 用哪个模型：{ provider, model }。留空（或 null）= 跟 DSH 那个 profile 的默认。
-      // 填了就在起进程时用 --patch 叠一层，不改你 profile 目录里的文件。面板「用量」页能改。
+      // 填了就在起进程时用 --patch 叠一层，不改你 profile 目录里的文件。面板「模型」页能改。
       model: null,
+      // 决策专用：整理记忆、体检、写交接纸条这几个后台活用它。
+      // 它们只需要"读一段文字、吐一段 JSON"，用最贵的模型是浪费；留空 = 跟 model 一样。
+      decideModel: null,
+      // 看图专用：表情包筛选、给表情打标签用它（这些活要先 read_image 再判断）。
+      // 留空 = 跟 model 一样。视觉模型便宜的话可以把这几个活全挪过去。
+      visionModel: null,
       // 换会话时，让旧会话把这段"过程"写成一张交接纸条，落进记忆。
       // 不加这条也能用（靠 events 和记忆条目），加了新会话就知道刚才在忙什么。
       handover: {

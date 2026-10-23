@@ -13,6 +13,7 @@
 //  · --json 吐 NDJSON 事件，第一行就能拿到 sessionId，用它换下一轮的 --session-id。
 //  · 任务文本走 stdin（参数写 `-`），省得为引号、换行和长度操心。
 import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -105,7 +106,7 @@ export class HeadlessBrain {
    *   onEvent 每收到一个 NDJSON 事件就同步调一次；返回 'abort' 就当场掐断这一轮。
    * @returns {Promise<{text: string, sessionId: string|null}>}
    */
-  async run({ prompt, sessionId = null, onEvent = null, profile = null }) {
+  async run({ prompt, sessionId = null, onEvent = null, profile = null, model = null }) {
     const key = this.#apiKey();
     if (!key) {
       throw new Error(`找不到 ${this.cfg.apiKeyEnv}：环境变量没有，${this.cfg.credentialsFile} 里也没有`);
@@ -126,10 +127,23 @@ export class HeadlessBrain {
     // 提供商三路合起来：下载者本机 DSH 里已有的（desktop 里加的中转站）+ 面板里自己加的
     const providers = { ...readDshProviders(), ...(this.cfg.providers || {}) };
     const extraEnv = providerEnv(providers);
+    // 这一轮用哪个模型：调用方传了就用传的（决策/看图各有专属模型），没传用配置里的。
+    const pick = (m) => (m && String(m.provider || '').trim() && String(m.model || '').trim() ? m : null);
+    const override = pick(model);
+    const fallback = pick(this.cfg.model);
+    const chosen = override || fallback;
+    // 三份 patch 互不覆盖：对话用固定的那份，决策/看图按 (provider/model) 各占一个文件。
+    // 不能只写一份——同时跑的两轮会互相改掉对方的模型。
+    const sameAsDefault = !override
+      || !fallback
+      || (override.provider === fallback.provider && override.model === fallback.model);
+    const fileName = sameAsDefault
+      ? 'model-patch.yml'
+      : `model-patch-${crypto.createHash('sha1').update(`${chosen.provider}/${chosen.model}`).digest('hex').slice(0, 8)}.yml`;
     const patch = writeModelPatch(path.join(ROOT, 'data'), {
-      ...(this.cfg.model || {}),
+      ...(chosen || {}),
       providers,
-    });
+    }, fileName);
     const prof = profile || this.cfg.profile;
     if (patch) args.push('--patch', patch, '--profile', prof, '--json');
     else args.push(prof, '--json');
@@ -143,6 +157,7 @@ export class HeadlessBrain {
       this.logger?.(
         'brain',
         `headless ${Date.now() - startedAt}ms，${result.text.length} 字，session=${result.sessionId || '?'}`
+        + (chosen ? `，模型 ${chosen.provider}/${chosen.model}` : '')
       );
       return result;
     } finally {

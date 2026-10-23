@@ -246,7 +246,7 @@ function yamlStr(v) {
  * @param {{ provider?: string, model?: string, providers?: Record<string, any> }} want
  * @returns {string|null}  patch 文件路径；既没模型也没 provider 就返回 null
  */
-export function writeModelPatch(dir, want = {}) {
+export function writeModelPatch(dir, want = {}, fileName = 'model-patch.yml') {
   const provider = String(want.provider || '').trim();
   const model = String(want.model || '').trim();
   const providers = want.providers && typeof want.providers === 'object' ? want.providers : {};
@@ -256,6 +256,7 @@ export function writeModelPatch(dir, want = {}) {
 
   const lines = [
     '# 由桥自动生成：这一轮用哪个模型、能用哪些提供商。',
+    `# 文件名：${fileName}（对话/决策/看图各一份，互不覆盖）`,
     '# 改这里没用——去面板「模型」页改，或改 config.local.json 的 brain.headless。',
   ];
 
@@ -294,7 +295,7 @@ export function writeModelPatch(dir, want = {}) {
   lines.push('');
 
   const body = lines.join('\n');
-  const file = path.join(dir, 'model-patch.yml');
+  const file = path.join(dir, fileName);
   try {
     const old = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
     if (old !== body) {

@@ -36,6 +36,8 @@ const EDITABLE = [
   'brain.headless.chatProfile',
   'brain.headless.rotateAtTokens',
   'brain.headless.model',
+  'brain.headless.decideModel',
+  'brain.headless.visionModel',
   'brain.headless.providers',
   'brain.headless.handover',
   'ack',
@@ -202,6 +204,10 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
       }
       // ── 配置 ──
       // ── 模型：现在用哪个、profile 默认是哪个 ──
+// {provider, model} 两个都填了才算数，否则当"没选"（留空 = 跟 profile / 跟主模型）
+const pair = (m) => (m && String(m.provider || '').trim() && String(m.model || '').trim()
+  ? { provider: String(m.provider).trim(), model: String(m.model).trim() }
+  : null);
       // 试一下这个模型能不能真跑通（会真起一轮，问一句话，几秒钟）
       if (area === 'model' && req.method === 'POST' && id === 'test') {
         const body = await readBody(req);
@@ -246,6 +252,13 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
         return json(res, 200, {
           ok: true,
           chosen: h.model && h.model.provider && h.model.model ? { provider: h.model.provider, model: h.model.model } : null,
+          // 三个槽位：对话（主）/ 决策（整理·体检·交接）/ 看图（表情筛选）。
+          // 后两个留空 = 跟主模型一样。
+          slots: {
+            chat: pair(h.model),
+            decide: pair(h.decideModel),
+            vision: pair(h.visionModel),
+          },
           profile: profileModel && profileModel.provider
             ? { provider: profileModel.provider, model: profileModel.model }
             : null,
