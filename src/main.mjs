@@ -44,6 +44,7 @@ import { watchParent } from './util/parent.mjs';
 import { startWeb } from './web/server.mjs';
 import { cleanupImages } from './media/cleanup.mjs';
 import { sniffImage, sniffVideo } from './media/sniff.mjs';
+import { gifFrameCount, gifToMp4 } from './media/gif.mjs';
 import { StickerLibrary } from './stickers/library.mjs';
 import { isYes, isNo } from './util/yesno.mjs';
 import { auditReply } from './safety/audit.mjs';
@@ -701,6 +702,25 @@ client.on('event', async (raw) => {
     if (files.length) {
       msg.imageFiles = files;
       L('media', `${msg.room} 存下 ${files.length} 张图：${files[0]}`);
+      // 多帧 GIF 顺手转一份 mp4：read_image 读 GIF 只给一帧，她要描述"在动什么"
+      // 就得抽帧，而 GIF 的帧延时经常是 0，转成视频时间轴才均匀（2026-10-23 试出来的）
+      for (const [i, f] of files.entries()) {
+        if (!/\.gif$/i.test(f)) continue;
+        try {
+          const buf = fs.readFileSync(f);
+          const frames = gifFrameCount(buf);
+          if (frames <= 1) continue;
+          const clip = await gifToMp4({
+            gifPath: f,
+            outDir: path.join(cfg.dataDir, 'videos'),
+            tag: `${msg.msgId || Date.now()}-${i}`,
+          });
+          if (clip) {
+            msg.videoFiles = [...(msg.videoFiles || []), clip];
+            L('media', `动图 ${frames} 帧，转了一份视频给她抽帧：${clip}`);
+          }
+        } catch { /* 转不出来就当普通图 */ }
+      }
       // 顺手收进她的表情库，先当"待分类"——分类靠当时的语境，不是看图
       for (const f of files) {
         try {
