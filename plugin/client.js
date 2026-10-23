@@ -807,6 +807,8 @@ window.__ModuleLoader__.load({
       ['self', '我自己的部分', '她自己的喜好与改动日志。改这个要开高级权限 —— 那是她自己的地方。'],
     ];
 
+    const VOICE_SCOPES = [['private', '私聊'], ['group', '群聊'], ['global', '全局兜底']];
+
     function PersonaTab(props) {
       const cfg = props.cfg || {};
       const [which, setWhich] = useState('core');
@@ -822,26 +824,30 @@ window.__ModuleLoader__.load({
       const [full, setFull] = useState(false);
       const [allowed, setAllowed] = useState(!!(cfg.web && cfg.web.allowFullAccess));
       // 口吻样例：把「她平时怎么说话」钉住（挑旧话里短的，比在末尾写规矩有用）
-      const [voice, setVoice] = useState([]);
+      // 私聊和群聊的腔调不一样，所以分开存、分开挑，别让两边打架
+      const [voiceStore, setVoiceStore] = useState({ global: [], private: [], group: [], rooms: {} });
+      const [voiceScope, setVoiceScope] = useState('private');
       const [voiceBusy, setVoiceBusy] = useState(false);
       const loadVoice = useCallback(async () => {
-        try { const r = await api('/api/voice'); setVoice(r.samples || []); } catch { setVoice([]); }
+        try {
+          const r = await api('/api/voice');
+          setVoiceStore(r.store || { global: [], private: [], group: [], rooms: {} });
+        } catch { setVoiceStore({ global: [], private: [], group: [], rooms: {} }); }
       }, []);
       useEffect(() => { loadVoice(); }, [loadVoice]);
       const pickVoice = async () => {
         setVoiceBusy(true);
         try {
-          const r = await api('/api/voice', { method: 'POST', body: JSON.stringify({ action: 'pick', n: 5 }) });
-          setVoice(r.samples || []);
-          setMsg(r.ok ? '重新挑了 ' + (r.samples || []).length + ' 句，下一轮就按这个腔调说话' : (r.error || '没挑到'));
+          const r = await api('/api/voice', { method: 'POST', body: JSON.stringify({ action: 'pick', n: 5, scope: voiceScope }) });
+          if (r.ok) { await loadVoice(); setMsg('给「' + voiceScope + '」挑了 ' + (r.samples || []).length + ' 句，下一轮就按这个腔调说话'); } else { setMsg(''); setErr(r.error || '没挑到'); }
         } catch (e) { setErr(e.message); }
         setVoiceBusy(false);
       };
       const clearVoice = async () => {
         setVoiceBusy(true);
         try {
-          await api('/api/voice', { method: 'POST', body: JSON.stringify({ action: 'clear' }) });
-          setVoice([]); setMsg('样例清掉了，她只靠人设卡说话');
+          await api('/api/voice', { method: 'POST', body: JSON.stringify({ action: 'clear', scope: voiceScope }) });
+          await loadVoice(); setMsg('「' + voiceScope + '」的样例清掉了，这一档她只靠人设卡说话');
         } catch (e) { setErr(e.message); }
         setVoiceBusy(false);
       };
@@ -893,12 +899,26 @@ window.__ModuleLoader__.load({
         // 口吻样例：人设漂走多半是"照着最近的自己继续说"，这几句是把她拽回来的锚
         h('div', { style: { ...S.item, marginBottom: 10, flexDirection: 'column', alignItems: 'stretch', gap: 6 } },
           h('div', { style: { fontSize: 12 } },
-            voice.length ? '口吻样例（每轮都摆在她眼前，照这个样子说话）：' : '还没有口吻样例 —— 挑几句她平时说的话，人设就没那么容易被带跑。',
+            '口吻样例（每轮摆在她眼前，照这个样子说话）。私聊和群聊分开挑，别让两边打架：',
           ),
-          ...voice.map((v, i) => h('div', { key: i, style: { ...S.tiny, paddingLeft: 8 } }, '· ' + v)),
+          h('div', { style: { display: 'flex', gap: 6 } },
+            VOICE_SCOPES.map(([id, label]) =>
+              h('div', { key: id, style: S.tab(voiceScope === id), onClick: () => setVoiceScope(id) }, label),
+            ),
+          ),
+          ((voiceStore[voiceScope] || []).length
+            ? (voiceStore[voiceScope] || []).map((v, i) => h('div', { key: i, style: { ...S.tiny, paddingLeft: 8 } }, '· ' + v))
+            : h('div', { style: { ...S.tiny, paddingLeft: 8 } },
+              '这一档还没有样例 —— 点下面的按钮，从这一档里挑几句。'
+              + (voiceStore.global && voiceStore.global.length ? '（现在暂时用全局那 ' + voiceStore.global.length + ' 句兜底）' : ''),
+            )
+          ),
+          Object.keys(voiceStore.rooms || {}).length
+            ? h('div', { style: { ...S.tiny, paddingLeft: 8 } }, '另有 ' + Object.keys(voiceStore.rooms).length + ' 个房间单独设了样例（房间优先，其次是这一档，最后是全局）')
+            : null,
           h('div', { style: { display: 'flex', gap: 8, marginTop: 4 } },
-            h('button', { style: S.btn(true), disabled: voiceBusy, onClick: pickVoice }, voiceBusy ? '挑…' : '从最近挑几句'),
-            h('button', { style: S.btn(false), disabled: voiceBusy || !voice.length, onClick: clearVoice }, '清掉'),
+            h('button', { style: S.btn(true), disabled: voiceBusy, onClick: pickVoice }, voiceBusy ? '挑…' : '从这一档挑几句'),
+            h('button', { style: S.btn(false), disabled: voiceBusy || !(voiceStore[voiceScope] || []).length, onClick: clearVoice }, '清掉这一档'),
           ),
         ),
         h('div', { style: { display: 'flex', gap: 6, marginBottom: 8 } },

@@ -5,8 +5,14 @@
 // 只要有一阵子说得长、说得像在交报告，后面就会照着那个样子继续说下去。
 // 光在末尾写「说话用平时那样」压不住——规则比不过样例。
 //
-// 所以这里挑几句**短、自然、没有工具痕迹**的旧话，摆在她眼前当锚。
-// 挑的是「最像她」的，不是「最新的」：新话质量没保证，旧话已经沉淀过了。
+// 但**私聊和群聊的腔调本来就不一样**：私聊可以黏、可以撒娇、可以晃尾巴；
+// 群里得短、得懒、得不招人烦。拿群体的样例去喂私聊（或者反过来），
+// 两边都会打架，所以按场合分开存：
+//   global  兜底（哪个场合都没单独设时用）
+//   private 私聊
+//   group   群聊
+//   rooms   某个具体房间（最优先）
+// 查找顺序：这个房间 → 同类的（私聊/群聊）→ 全局 → 都没有就不带这段。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -47,6 +53,14 @@ function tooSimilar(a, b) {
   return hit / Math.min(A.size, B.size) > 0.5;
 }
 
+/** 房间号属于哪一类：private / group */
+export function kindOfRoom(roomKey = '') {
+  const s = String(roomKey);
+  if (s.startsWith('group:')) return 'group';
+  if (s.startsWith('private:')) return 'private';
+  return '';
+}
+
 /**
  * 从事件流里挑几句当口吻样例。
  * @param {Array} events 事件（按时间正序）
@@ -71,18 +85,91 @@ export function pickSamples(events = [], { n = 5, room = '', selfNames = [] } = 
   return out;
 }
 
-/** 读样例文件；没有/坏了就当没有 */
+const emptyStore = () => ({ global: [], private: [], group: [], rooms: {} });
+const cleanList = (x) => (Array.isArray(x) ? x : [])
+  .filter((s) => typeof s === 'string' && s.trim())
+  .slice(0, 8);
+
+/**
+ * 读整份样例表。老格式（直接是数组 / {samples:[...]}）当成 global，别把存档读坏。
+ * @returns {{global:string[], private:string[], group:string[], rooms:Record<string,string[]>}}
+ */
+export function loadStore(file) {
+  const store = emptyStore();
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return store; }
+  if (Array.isArray(raw)) { store.global = cleanList(raw); return store; }
+  if (!raw || typeof raw !== 'object') return store;
+  if (Array.isArray(raw.samples)) store.global = cleanList(raw.samples);
+  store.private = cleanList(raw.private);
+  store.group = cleanList(raw.group);
+  if (raw.rooms && typeof raw.rooms === 'object') {
+    for (const [k, v] of Object.entries(raw.rooms)) {
+      const list = cleanList(v && v.samples ? v.samples : v);
+      if (list.length) store.rooms[k] = list;
+    }
+  }
+  return store;
+}
+
+export function saveStore(file, store) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const out = {
+    global: store.global || [],
+    private: store.private || [],
+    group: store.group || [],
+    rooms: store.rooms || {},
+    pickedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(file, JSON.stringify(out, null, 2));
+  return out;
+}
+
+/** scope 写法：global / private / group / room:<房间号>（直接给房间号也认） */
+export function parseScope(scope = 'global') {
+  const s = String(scope || 'global');
+  if (s === 'global' || s === 'private' || s === 'group') return { kind: s, room: '' };
+  if (s.startsWith('room:')) return { kind: 'room', room: s.slice(5) };
+  if (s.includes(':')) return { kind: 'room', room: s };
+  return { kind: 'global', room: '' };
+}
+
+/** 往某个 scope 写样例；scope 是 room 时要带房间号 */
+export function setScope(store, scope, samples = []) {
+  const { kind, room } = parseScope(scope);
+  const list = cleanList(samples);
+  if (kind === 'room') {
+    if (!room) throw new Error('room scope 要带房间号');
+    if (list.length) store.rooms[room] = list; else delete store.rooms[room];
+  } else {
+    store[kind] = list;
+  }
+  return store;
+}
+
+/**
+ * 某个房间该看到的样例：这个房间 → 同类（私聊/群聊）→ 全局。
+ * @returns {{samples:string[], from:''|'room'|'private'|'group'|'global', scope:string}}
+ */
+export function samplesFor(store, roomKey = '') {
+  const kind = kindOfRoom(roomKey);
+  if (roomKey && store.rooms && store.rooms[roomKey] && store.rooms[roomKey].length) {
+    return { samples: store.rooms[roomKey], from: 'room', scope: `room:${roomKey}` };
+  }
+  if (kind && store[kind] && store[kind].length) return { samples: store[kind], from: kind, scope: kind };
+  if (store.global && store.global.length) return { samples: store.global, from: 'global', scope: 'global' };
+  return { samples: [], from: '', scope: '' };
+}
+
+/** 老接口：整份当 global 读写 */
 export function loadSamples(file) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const list = Array.isArray(raw) ? raw : raw?.samples;
-    return (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string' && x.trim()).slice(0, 8);
-  } catch { return []; }
+  return loadStore(file).global;
 }
 
 export function saveSamples(file, samples = []) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ samples, pickedAt: new Date().toISOString() }, null, 2));
+  const store = loadStore(file);
+  setScope(store, 'global', samples);
+  saveStore(file, store);
   return samples.length;
 }
 

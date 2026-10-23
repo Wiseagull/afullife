@@ -14,7 +14,7 @@ import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mj
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
 import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
-import { loadSamples, voiceBlock } from './body/voice.mjs';
+import { loadStore, samplesFor, voiceBlock } from './body/voice.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
 import { setWorkspaceRoots, underWorkspace, allowImageRead } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
@@ -340,13 +340,22 @@ ${mine}`);
 // 她平时说话的样例：别人的嘴改不了，自己的嘴能锚住。
 // 每轮现读（文件小），改了不用重启桥。
 const VOICE_FILE = path.join(ROOT, 'data', 'voice-samples.json');
-function voiceNoteFor() {
-  const samples = loadSamples(VOICE_FILE);
-  return samples.length ? voiceBlock(samples) : '';
+// 私聊和群聊的腔调不一样，所以按房间挑：这个房间 → 同类 → 全局（见 src/body/voice.mjs）
+function voiceNoteFor(roomKey = '') {
+  const hit = samplesFor(loadStore(VOICE_FILE), roomKey);
+  return hit.samples.length ? voiceBlock(hit.samples) : '';
 }
 {
-  const n = loadSamples(VOICE_FILE).length;
-  L('voice', n ? `口吻样例 ${n} 句（data/voice-samples.json）` : '没有口吻样例——跑 node scripts/voice.mjs pick 挑几句');
+  const store = loadStore(VOICE_FILE);
+  const parts = [
+    store.private.length ? `私聊 ${store.private.length}` : '',
+    store.group.length ? `群聊 ${store.group.length}` : '',
+    store.global.length ? `全局 ${store.global.length}` : '',
+    Object.keys(store.rooms || {}).length ? `单独房间 ${Object.keys(store.rooms).length}` : '',
+  ].filter(Boolean);
+  L('voice', parts.length
+    ? `口吻样例：${parts.join(' / ')} 句（data/voice-samples.json）`
+    : '没有口吻样例——跑 node scripts/voice.mjs pick --scope=private 挑几句');
 }
 
 // 她身上装了什么，提示词就只说装了的。
@@ -838,14 +847,14 @@ async function handleBatch(roomKey, msgs) {
   const turnProfile = verdict.full || !chatProfile ? null : chatProfile;
   if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor() });
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey) });
   let prompt = sid
     ? buildFollowup(msgs, {
       delta, isGroup: asGroup, addressed, selfNames: names, stickerLine,
       personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner }),
       rules: verdict.full ? rulesText : '',
       usageLine: usageLineFor(roomKey),
-      voice: voiceNoteFor(),
+      voice: voiceNoteFor(roomKey),
     })
     : promptFresh;
 

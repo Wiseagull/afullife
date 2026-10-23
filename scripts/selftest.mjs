@@ -498,6 +498,31 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('只挑她自己说的、且短', picked.length === 2 && picked.every((x) => x.length < 50));
   ok('没有样例就不拼这一段', voiceBlock([]) === '');
   ok('样例段落带标题', voiceBlock(['早呀']).includes('你平时说话的样子'));
+
+  // 私聊 / 群聊分开挑，别打架：房间 → 同类 → 全局，逐级兜底
+  const v = await import('../src/body/voice.mjs');
+  const store = { global: ['全局一句'], private: ['私聊一句'], group: ['群聊一句'], rooms: { 'group:42': ['这个房间专属'] } };
+  ok('群房间优先用房间自己的', v.samplesFor(store, 'group:42').samples[0] === '这个房间专属');
+  ok('别的群用群聊那份', v.samplesFor(store, 'group:99').samples[0] === '群聊一句');
+  ok('私聊用私聊那份', v.samplesFor(store, 'private:7').samples[0] === '私聊一句');
+  ok('两档都没设才用全局', v.samplesFor({ global: ['兜底'], private: [], group: [], rooms: {} }, 'private:7').samples[0] === '兜底');
+  ok('全都没有就不带', v.samplesFor({ global: [], private: [], group: [], rooms: {} }, 'group:1').samples.length === 0);
+  ok('私聊挑的样例不会串到群里', (() => {
+    const pool = [
+      { dir: 'out', room: 'private:1', text: '私聊里的软话' },
+      { dir: 'out', room: 'group:1', text: '群里的话' },
+    ];
+    const onlyGroup = v.pickSamples(pool.filter((e) => v.kindOfRoom(e.room) === 'group'), { n: 3 });
+    return onlyGroup.length === 1 && onlyGroup[0] === '群里的话';
+  })());
+  // 老格式（数组）要能读回来，别把已经存好的样例读丢
+  const tmpFile = path.join(ROOT, 'tmp', 'voice-selftest.json');
+  fs.mkdirSync(path.dirname(tmpFile), { recursive: true });
+  fs.writeFileSync(tmpFile, JSON.stringify(['老格式一句']));
+  ok('老格式当全局读', v.loadStore(tmpFile).global[0] === '老格式一句');
+  v.saveStore(tmpFile, { global: [], private: ['私聊'], group: [], rooms: {} });
+  ok('分档存得住', v.loadStore(tmpFile).private[0] === '私聊');
+  fs.rmSync(tmpFile);
 }
 
 // ── 回看时她自己的长回复只留开头 ────────────────────────────

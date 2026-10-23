@@ -7,7 +7,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { ROOT, notebookDir } from '../config.mjs';
 import { ensureToken, TOKEN_HEADER } from './token.mjs';
-import { pickSamples, loadSamples, saveSamples, voiceBlock } from '../body/voice.mjs';
+import { pickSamples, loadStore, saveStore, setScope, samplesFor, parseScope, voiceBlock, kindOfRoom } from '../body/voice.mjs';
 import { ensureSnowLuma } from '../snowluma/launch.mjs';
 import { isPortOpen } from '../snowluma/runtime.mjs';
 import { listToggleable, installPlugins, uninstallPlugins } from './plugins.mjs';
@@ -409,26 +409,46 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
       // 人设漂走的机制是「照着最近的自己继续说」；这里挑几句短的旧话，
       // 每轮摆在她眼前当锚（比在末尾写十句"说话自然点"有用）。
       if (area === 'voice' && req.method === 'GET') {
-        const samples = loadSamples(VOICE_SAMPLES);
-        return json(res, 200, { ok: true, samples, block: voiceBlock(samples), file: VOICE_SAMPLES }, origin);
+        const room = String(url.searchParams.get('room') || '');
+        const store = loadStore(VOICE_SAMPLES);
+        const hit = samplesFor(store, room);
+        return json(res, 200, {
+          ok: true,
+          room,
+          // 这个房间实际会用哪一份（私聊/群聊各自一套，房间可以再单独一套）
+          resolved: { from: hit.from, scope: hit.scope, samples: hit.samples, block: voiceBlock(hit.samples) },
+          store: { global: store.global, private: store.private, group: store.group, rooms: store.rooms },
+          file: VOICE_SAMPLES,
+        }, origin);
       }
 
       if (area === 'voice' && req.method === 'POST') {
         const body = await readBody(req);
         const action = String(body?.action || 'pick');
+        const scope = String(body?.scope || 'global');
+        const parsed = parseScope(scope);
+        const store = loadStore(VOICE_SAMPLES);
         if (action === 'clear') {
-          try { fs.rmSync(VOICE_SAMPLES); } catch { /* 本来就没有 */ }
-          logger?.info?.('voice', '口吻样例清掉了');
-          return json(res, 200, { ok: true, samples: [] }, origin);
+          setScope(store, scope, []);
+          saveStore(VOICE_SAMPLES, store);
+          logger?.info?.('voice', `口吻样例清掉了（${scope}）`);
+          return json(res, 200, { ok: true, scope, samples: [] }, origin);
         }
         const n = Math.min(8, Math.max(1, Number(body?.n) || 5));
-        const days = Math.min(14, Math.max(1, Number(body?.days) || 3));
-        const list = events?.readRecent ? events.readRecent({ limit: 800 }) : [];
-        const picked = pickSamples(list, { n });
-        if (!picked.length) return json(res, 200, { ok: false, error: '这几天她说的都太长了，没挑出合适的' }, origin);
-        saveSamples(VOICE_SAMPLES, picked);
-        logger?.info?.('voice', `重挑了口吻样例 ${picked.length} 句`);
-        return json(res, 200, { ok: true, samples: picked, block: voiceBlock(picked) }, origin);
+        // 按 scope 决定从哪些房间里挑：具体房间只取那个房间的；私聊/群聊只取同类；全局不限
+        const wanted = parsed.kind === 'room' ? parsed.room : '';
+        const kind = parsed.kind === 'private' || parsed.kind === 'group' ? parsed.kind : '';
+        let list = events?.readRecent ? events.readRecent({ limit: 1500 }) : [];
+        if (kind) list = list.filter((e) => e.room && kindOfRoom(e.room) === kind);
+        const picked = pickSamples(list, { n, room: wanted });
+        if (!picked.length) {
+          const where = parsed.kind === 'room' ? '这个房间' : kind === 'private' ? '私聊里' : kind === 'group' ? '群里' : '';
+          return json(res, 200, { ok: false, error: `${where}这几天她说的都太长了，没挑出合适的`, scope }, origin);
+        }
+        setScope(store, scope, picked);
+        saveStore(VOICE_SAMPLES, store);
+        logger?.info?.('voice', `重挑了口吻样例 ${picked.length} 句（${scope}）`);
+        return json(res, 200, { ok: true, scope, samples: picked, block: voiceBlock(picked) }, origin);
       }
 
       // ── 人设 ──
