@@ -147,10 +147,10 @@ const TABLE_CACHE = new Map();
  * CLI 的 `--dump-config` 会拒（`profile "desktop" is managed exclusively by the
  * Electron application`），所以不能靠问 DSH，只能读它的配置文件。
  *
- * @param {string} [dshHome]  默认 ~/.dsh
+ * @param {string} [dshHome]  默认 `$DSH_HOME` 或 ~/.dsh（跟 scripts/install-panel.mjs 一个口径）
  * @returns {Record<string, any>}
  */
-export function readDshProviders(dshHome = path.join(os.homedir(), '.dsh'), { ttlMs = 60 * 1000, force = false } = {}) {
+export function readDshProviders(dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), { ttlMs = 60 * 1000, force = false } = {}) {
   const hit = TABLE_CACHE.get(dshHome);
   if (!force && hit && Date.now() - hit.at < ttlMs) return hit.table;
 
