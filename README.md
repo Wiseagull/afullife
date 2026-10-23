@@ -42,7 +42,7 @@ AFULLIFE，a full life。不是缩写游戏，是一句许愿：**give your QQbo
 - 它通过 [SnowLuma](https://github.com/SnowLuma/SnowLuma) 这类 OneBot v11 实现与 QQ 通信，
   属于**第三方协议实现**，可能违反腾讯的服务协议，**有被限制或封号的风险**
 - 仅供个人自用与学习，风险自负；与腾讯、DeepSeek 均无关
-- 按 GPL-3.0 提供，**不附带任何担保**
+- 按 MIT 协议提供，**不附带任何担保**
 
 ## 三条原则
 
@@ -201,12 +201,11 @@ config.example.json  配置模板
 ## 许可证
 
 ```
-a full life (AFULLIFE)
-Copyright (C) 2026  Wiseagull·Deriouze
+MIT License
+Copyright (c) 2026  Wiseagull·Deriouze
 ```
 
-GPL-3.0-or-later。简单说：**你可以拿去用、改、再发布，但改完再发布也得开源**，
-而且要保留这条版权声明、不提供担保。完整条款见 [LICENSE](LICENSE)（顶部就是上面这三行，
-下面是不改一字的 GPL 全文）。
+MIT。简单说：**你拿去用、改、改完再发布、甚至拿去卖都行**，只要保留这条版权声明、
+不要求你开源自己的改动、也不附带任何担保。完整条款见 [LICENSE](LICENSE)（全文只有二十来行）。
 
-如果你把它改成自己的版本再发布，按 GPL 的要求把源码也放出来就行。
+如果你把它改成自己的版本再发布，改不改、开不开源都由你自己决定——MIT 不要求这些。

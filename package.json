@@ -21,7 +21,7 @@
     "lint": "eslint .",
     "probe:conflict": "node scripts/probe-conflict.mjs"
   },
-  "license": "GPL-3.0-or-later",
+  "license": "MIT",
   "keywords": [
     "qq",
     "onebot",
