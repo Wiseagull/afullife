@@ -2,6 +2,25 @@
 
 版本号按 `主.次.修` 走；每次改了什么、为什么改，记在这儿。
 
+## 0.3.3
+
+**换模型不用改配置文件了：面板「模型」页直接选，还能借用你 DSH 里已经配好的提供商。**
+
+- **「模型」单独一页**：原来挤在「用量」页底下，现在自己一页。留空 = 跟 `headless` profile 的默认；
+  填了 `provider` + `model` 就存进 `config.local.json` 的 `brain.headless.model`。
+  保存不用重启桥——每轮起进程时现写 `data/model-patch.yml`，用 `--patch` 叠在 profile 之上，
+  你 `~/.dsh/profiles/` 里的文件一个字都不动。
+- **借用 DSH 里已经配好的提供商**：你在 DSH 设置里加过的中转站、自建网关，面板会列出来，
+  每家的模型 id 是一颗按钮，点一下填好、再点保存就切过去。读的是
+  `~/.dsh/profiles/*/cordis.patch.yml` 里 `llm-pi-ai.config.providers` 那段，密钥按 `apiKeyEnv`
+  去 `~/.dsh/.credentials.yaml` 的 `refs` 里取——**不复制你的密钥**，那一轮起进程时塞进子进程环境变量，
+  用完即走。（`desktop` 那个 profile 被 Electron 独占，`--dump-config` 会拒，所以只能读文件。）
+- **「试一下」**：真起一轮问「只回两个字：在的」，把毫秒数和回答打出来。写错 provider 当场报
+  `NO_ADAPTER`，密钥没配好报 `MISSING_CREDENTIAL`，不用等她下一句才发现。
+- **不再让你重填一遍地址和密钥**：0.3.3 中途做过的「面板里自己加提供商」已经撤掉——
+  要接中转站就去 DSH 里加一次，加完这里自动出现。
+- 自检 173 → 192 项。
+
 ## 0.3.1
 
 **读事件流不再把整份文件塞进内存，另加一个装完能自查的 `doctor`。**
