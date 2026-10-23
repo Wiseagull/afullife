@@ -13,11 +13,11 @@ import { SelfDrafts } from './memory/selfdrafts.mjs';
 import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mjs';
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
-import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
+import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentImagesHint, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { loadStore, samplesFor, voiceBlock } from './body/voice.mjs';
 import { personaNoteFor } from './body/persona-note.mjs';
 import { judgeFull, chatRules } from './body/rules.mjs';
-import { setWorkspaceRoots, underWorkspace, allowImageRead } from './safety/rules.mjs';
+import { setWorkspaceRoots, underWorkspace, allowImageRead, imageReadScope } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
 import { NotesStore } from './memory/notes.mjs';
@@ -411,14 +411,20 @@ function makeOnEvent(room) {
  *  群里没人是他，她连看一眼图的权限都没有，等于瞎。
  *  但也不能干脆放开 read_image（那就等于谁都能让她去读本机任意文件），
  *  所以只认这一批消息里那几张图的确切路径。 */
+// 她自己能看的图：聊天里落过盘的那些（data/images）。不放开任意路径。
+const IMAGE_DIRS = [path.join(ROOT, 'data', 'images')];
+
 function makeDenyAllOnEvent(room, allowedReadPaths = new Set()) {
   return (ev) => {
     if (ev?.type !== 'tool_call') return;
     auditRoom = room;
     const v = classify(ev.tool, ev.input);
-    if (allowImageRead(ev.tool, ev.input, allowedReadPaths)) {
+    const scope = imageReadScope(ev.tool, ev.input, allowedReadPaths, IMAGE_DIRS);
+    if (scope) {
       gate.onAudit?.({ tool: ev.tool, input: ev.input, verdict: { ...v, level: 'note', ruleId: 'non-owner-image' } });
-      L('gate', '(不是特权号) 放行 read_image：这是他刚发的那张图');
+      L('gate', scope === 'batch'
+        ? '(不是特权号) 放行 read_image：这是他刚发的那张图'
+        : '(不是特权号) 放行 read_image：这是聊天里落过盘的老图');
       return;
     }
     gate.onAudit?.({ tool: ev.tool, input: ev.input, verdict: { ...v, level: 'block', ruleId: 'non-owner' } });
@@ -833,7 +839,17 @@ async function handleBatch(roomKey, msgs) {
   const fromOwnerEarly = isRoot(last.from);
   if (!fromOwnerEarly) {
     prompt += '\n\n' + NOPOWER_HINT;
-    if (batchImages.size) prompt += '\n' + NOPOWER_IMAGE_HINT;
+    // 别只在"这一批正好带图"时才说：他不在的时候，她常是被别的话叫醒的，
+    // 图是半小时前发的——那时 allowedReadPaths 是空的，她连有这张图都不知道。
+    prompt += '\n' + NOPOWER_IMAGE_HINT;
+    // 他不在时她常是被别的话叫醒的：手上没有图，也不知道上一条图在哪。
+    // 把这一间最近出现过的图直接摊给她，省得她再"打不开"。
+    const recentImgs = (Array.isArray(recent) ? recent : [])
+      .filter((e) => Array.isArray(e.imageFiles) && e.imageFiles.length)
+      .slice(-4)
+      .flatMap((e) => e.imageFiles);
+    const imgHint = recentImagesHint(recentImgs);
+    if (imgHint) prompt += '\n' + imgHint;
   }
 
   // 谁能让她动手，只看"这话是谁说的"：

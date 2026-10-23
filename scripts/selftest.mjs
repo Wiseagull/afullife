@@ -491,6 +491,22 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('别的路径不给看', !allowImageRead('read_image', { file_path: String.raw`E:\secret\x.jpg` }, allowed));
   ok('别的工具一样不给', !allowImageRead('pwsh', { command: 'dir' }, allowed));
   ok('没给路径就当不给', !allowImageRead('read_image', {}, allowed));
+
+  // 2026-10-23：他不在的时候她仍读不了群里的图——被概率唤醒时这一批没有图，
+  // 而图是半小时前发的，早不在 allowed 里了。所以补一条：data/images 里的都能看。
+  const { imageReadScope } = await import('../src/safety/rules.mjs');
+  const dirs = [String.raw`E:\proj\data\images`];
+  ok('这一批里的图：判成 batch',
+    imageReadScope('read_image', { file_path: String.raw`E:\img\a.jpg` }, allowed, dirs) === 'batch');
+  ok('老图在 data/images 里：判成 dir',
+    imageReadScope('read_image', { file_path: String.raw`E:\proj\data\images\123-0.jpg` }, new Set(), dirs) === 'dir');
+  ok('正斜杠写的老图也认',
+    imageReadScope('read_image', { file_path: 'E:/proj/data/images/123-0.jpg' }, new Set(), dirs) === 'dir');
+  ok('data/images 之外的老图不给', imageReadScope('read_image', { file_path: String.raw`E:\proj\data\stickers\x.jpg` }, new Set(), dirs) === '');
+  ok('名字蹭前缀的不给', imageReadScope('read_image', { file_path: String.raw`E:\proj\data\images2\x.jpg` }, new Set(), dirs) === '');
+  ok('目录本身不算一张图', imageReadScope('read_image', { file_path: String.raw`E:\proj\data\images` }, new Set(), dirs) === '');
+  ok('别的工具就算在 data/images 里也不放',
+    imageReadScope('pwsh', { file_path: String.raw`E:\proj\data\images\1-0.jpg` }, new Set(), dirs) === '');
 }
 
 

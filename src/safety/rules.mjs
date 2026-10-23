@@ -136,15 +136,37 @@ export function classify(tool, input = {}) {
  * @param {Set<string>} allowed 允许读的绝对路径（已经 resolve 过的）
  * @returns {boolean}
  */
-export function allowImageRead(tool, input = {}, allowed = new Set()) {
-  if (tool !== 'read_image') return false;
+export function allowImageRead(tool, input = {}, allowed = new Set(), dirs = []) {
+  return imageReadScope(tool, input, allowed, dirs) !== '';
+}
+
+/**
+ * 同上，但说清是哪一种放行的：
+ *  · `'batch'` —— 这一批消息里刚落到盘上的那张
+ *  · `'dir'`   —— 在 `data/images/` 里（聊天里落过盘的图，回头看老图走这条）
+ *  · `''`      —— 不放行
+ *
+ * 为什么要加 `dirs`：2026-10-23 他不在的时候，群里别人发图她还是读不了——
+ * 因为她被概率唤醒时，那一批里没有图，`allowed` 是空的；而图是半小时前发的，
+ * 早就不在「这一批」里了。只认 `data/images/` 这一个目录（我们自己从聊天里
+ * 下载下来的那张），仍然不放开 read_image 读任意路径。
+ */
+export function imageReadScope(tool, input = {}, allowed = new Set(), dirs = []) {
+  if (tool !== 'read_image') return '';
   const want = String(input?.file_path ?? input?.path ?? '');
-  if (!want) return false;
+  if (!want) return '';
   const w = path.resolve(want);
   for (const a of allowed) {
-    if (samePath(w, path.resolve(String(a)))) return true;
+    if (samePath(w, path.resolve(String(a)))) return 'batch';
   }
-  return false;
+  for (const d of dirs) {
+    const base = path.resolve(String(d)).replace(/[\\/]+$/, '');
+    const norm = w.replace(/\\/g, '/');
+    const baseNorm = base.replace(/\\/g, '/');
+    if (norm === baseNorm) return '';
+    if (norm.startsWith(baseNorm + '/')) return 'dir';
+  }
+  return '';
 }
 
 /**

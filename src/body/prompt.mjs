@@ -121,9 +121,19 @@ export const NOPOWER_HINT = [
 // 白名单也放行了，她就是一次 read_image 都没调，回的还是"我这边还是空白一片"。
 // 所以看图要单独写明——它是这一轮唯一允许的动作。
 export const NOPOWER_IMAGE_HINT = [
-  '（例外一条：这条消息带了图，路径就写在正文的括号里。用 read_image 打开看一眼是允许的、也该看；）',
-  '（看完照常说话，别把路径念出来。除了看图，别的工具还是都不能用。）',
+  '（例外一条：图可以看。这条消息带了图的，路径就写在正文的括号里；之前几轮落到盘上的老图（data/images 里那些）也能回头看，）',
+  '（不用问谁要。用 read_image 打开看一眼是允许的、也该看；看完照常说话，别把路径念出来。）',
+  '（除了看图，别的工具还是都不能用。）',
 ].join(String.fromCharCode(10));
+
+export function recentImagesHint(list = []) {
+  const paths = [...new Set((Array.isArray(list) ? list : []).filter(Boolean).map(String))].slice(0, 5);
+  if (!paths.length) return '';
+  return [
+    '（这几张是最近聊天里出现过的图，想看就直接看，不用问谁要：）',
+    ...paths.map((x) => `  ${x}`),
+  ].join(String.fromCharCode(10));
+}
 
 export const KNOW_HINT = [
   '（上面那些是你自己记得的事，不用去翻 data/events 或日志核对；真想不起来就直说记不清。）',

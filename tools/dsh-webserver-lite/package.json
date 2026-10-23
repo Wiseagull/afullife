@@ -1,6 +1,6 @@
 {
   "name": "dsh-webserver-lite",
-  "version": "0.3.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "给没有 webServer 服务的 profile（headless）补一个最小实现，好让 dsh-image-gen 这类插件挂得上",
