@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ROOT } from '../config.mjs';
-import { writeModelPatch } from './model.mjs';
+import { writeModelPatch, providerEnv } from './model.mjs';
 
 /**
  * 默认从"正在跑我自己的这个进程"推：
@@ -45,6 +45,8 @@ const DEFAULTS = {
   // 用哪个模型：{ provider, model }。空就用 profile 自己的默认（agent-default-model）。
   // 选了就写一份 patch 用 --patch 叠上去，见 src/brain/model.mjs 顶上那段。
   model: null,
+  // 自己加的提供商（面板「模型」页填的），形状见 src/brain/model.mjs
+  providers: {},
   // 默认就在项目自己目录里干活：她画的东西、写的文件都落在这儿，不散到别的工作区
   workspace: ROOT,
   timeoutMs: 120000,
@@ -120,7 +122,12 @@ export class HeadlessBrain {
     const args = [this.cfg.cli];
     // 指定了模型就先叠一层 patch。注意：带 --patch 时 profile 必须用 --profile 显式给，
     // 写成位置参数（dsh --patch x headless）会被拒：--profile <name> is required。
-    const patch = writeModelPatch(path.join(ROOT, 'data'), this.cfg.model || {});
+    // 面板里加的自定义提供商也算在同一份 patch 里（它们的 key 走环境变量，不进 DSH 凭据）
+    const extraEnv = providerEnv(this.cfg.providers || {});
+    const patch = writeModelPatch(path.join(ROOT, 'data'), {
+      ...(this.cfg.model || {}),
+      providers: this.cfg.providers || {},
+    });
     const prof = profile || this.cfg.profile;
     if (patch) args.push('--patch', patch, '--profile', prof, '--json');
     else args.push(prof, '--json');
@@ -130,7 +137,7 @@ export class HeadlessBrain {
     this.running += 1;
     const startedAt = Date.now();
     try {
-      const result = await this.#spawn(args, String(prompt ?? ''), key, onEvent);
+      const result = await this.#spawn(args, String(prompt ?? ''), key, onEvent, extraEnv);
       this.logger?.(
         'brain',
         `headless ${Date.now() - startedAt}ms，${result.text.length} 字，session=${result.sessionId || '?'}`
@@ -141,7 +148,7 @@ export class HeadlessBrain {
     }
   }
 
-  #spawn(args, prompt, key, onEvent = null) {
+  #spawn(args, prompt, key, onEvent = null, extraEnv = {}) {
     return new Promise((resolve, reject) => {
       const child = spawn(this.cfg.node, args, {
         cwd: this.cfg.workspace,
@@ -152,6 +159,7 @@ export class HeadlessBrain {
           ELECTRON_RUN_AS_NODE: '1',
           DSH_PERMISSION_MODE: this.cfg.permissionMode,
           [this.cfg.apiKeyEnv]: key,
+          ...extraEnv,
         },
       });
 

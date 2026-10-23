@@ -634,7 +634,7 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
 
 // ── 模型（src/brain/model.mjs）───────────────────────────
 {
-  const { parseDefaultModel, writeModelPatch } = await import('../src/brain/model.mjs');
+  const { parseDefaultModel, writeModelPatch, providerIdOk, keyEnvName, parseProviderIds, providerEnv, readCredentialRef } = await import('../src/brain/model.mjs');
   const fake = [
     '- id: jobs',
     '  name: x',
@@ -661,6 +661,44 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   const body = f ? fs.readFileSync(f, 'utf8') : '';
   check('模型：patch 里的 provider 对', /provider: tokenrhythm/.test(body), true);
   check('模型：patch 里的 model 对', /model: deepseek-v4\.1-flash-1017/.test(body), true);
+  // 自己加的提供商：写进同一份 patch，密钥走环境变量
+  const pf = writeModelPatch(dir, {
+    provider: 'acme-gateway',
+    model: 'gpt-x',
+    providers: {
+      'acme-gateway': {
+        displayName: '中转站',
+        api: 'openai-completions',
+        baseURL: 'https://gateway.example/v1',
+        apiKeyRef: 'ACME_KEY',
+        models: ['gpt-x'],
+      },
+    },
+  });
+  const pfBody = pf ? fs.readFileSync(pf, 'utf8') : '';
+  check('提供商：patch 里有 llm-pi-ai 那段', /- id: llm-pi-ai/.test(pfBody), true);
+  check('提供商：apiKeyEnv 按 id 派生', /apiKeyEnv: QAD_LLM_KEY_ACME_GATEWAY/.test(pfBody), true);
+  check('提供商：baseURL 写进去了', /baseURL: https:\/\/gateway\.example\/v1/.test(pfBody), true);
+  check('提供商：模型 id 写进去了', /- id: gpt-x/.test(pfBody), true);
+  check('提供商：id 不合法的不往里写', writeModelPatch(dir, { providers: { Bad: { baseURL: 'https://x' } } }), null);
+  check('提供商：id 校验', [providerIdOk('acme-gateway'), providerIdOk('Acme'), providerIdOk('a'), providerIdOk('9x')],
+    [true, false, false, false]);
+  check('提供商：环境变量名', keyEnvName('acme-gateway'), 'QAD_LLM_KEY_ACME_GATEWAY');
+  check('提供商：从 dump-config 里认出已有名单', parseProviderIds([
+    '- id: llm-pi-ai',
+    "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+    '  config:',
+    '    providers:',
+    '      aicost:',
+    '        baseURL: https://a/v1',
+    '      tokenrhythm:',
+    '        baseURL: https://t/v1',
+    '- id: next-one',
+  ].join('\n')), ['aicost', 'tokenrhythm']);
+  check('提供商：面板填的 key 优先', providerEnv({ x: { apiKey: 'sk-1' } }).QAD_LLM_KEY_X, 'sk-1');
+  check('提供商：没有 key 也没有 ref 就不塞环境变量', Object.keys(providerEnv({ y: { apiKeyRef: '' } })).length, 0);
+  check('提供商：读 DSH 凭据里的 ref', readCredentialRef('NO_SUCH_REF_THANKS'), '');
+
   check('模型：不指定就不写 patch（用 profile 默认）', writeModelPatch(dir, {}), null);
   check('模型：只填一半也不写', writeModelPatch(dir, { provider: 'aicost' }), null);
   fs.rmSync(dir, { recursive: true, force: true });

@@ -186,9 +186,30 @@ notebook/tmp/        临时
   `NO_ADAPTER: no adapter registered for provider "xxx"`
 
 **能选哪些**：只有 profile 里装了适配器的才能用。默认的 `headless` profile 只带 deepseek
-（`llm-deepseek` / `llm-deepseek-account` / `llm-pi-ai`），所以填 `tokenrhythm`、`aicost`、`glm`
-这类名字会得到 `NO_ADAPTER`。想用别家，得像在 DSH 里加提供商那样，先给 headless 那个
-profile 装对应的适配器插件、把 key 存进 DSH 凭据，再来这里填。
+（`llm-deepseek` / `llm-deepseek-account` / `llm-pi-ai`），所以直接填 `tokenrhythm`、`aicost`、`glm`
+这类名字会得到 `NO_ADAPTER`。
+
+### 自己加提供商（中转站、自建网关都行）
+
+`llm-pi-ai` 那个适配器本身是通用的：只要对面说 OpenAI 或 Anthropic 那套协议，就能接。
+面板「模型」页下半张就是给这个用的，跟 DSH 设置里那个「自定义模型 API」一个意思：
+
+| 填什么 | 说明 |
+| --- | --- |
+| Provider ID | 小写字母开头，`a-z0-9._-`，它同时决定环境变量名（`QAD_LLM_KEY_<ID>`） |
+| 显示名称 | 只用来在列表里好看 |
+| API 地址 | 到 `/v1` 那一层，如 `https://gateway.example/v1` |
+| API 协议 | `openai-completions` / `openai-responses` / `anthropic-messages` |
+| API 密钥 | 填在这里 = 只存本机 `config.local.json`；也可以填**DSH 凭据里的名字**（如 `TOKENRHYTHM_API_KEY`）复用它 |
+| 模型 id | 逗号分开，至少一个 |
+
+它做的事：把这几家写进 `data/model-patch.yml` 的 `llm-pi-ai.providers` 里，**密钥不进 DSH 凭据文件**，
+起子进程时用环境变量喂进去。所以：不用改你的 profile、不用往 `.credentials.yaml` 里塞东西，
+删掉这家就是把这行从面板里删掉。
+
+填完在「模型」页上半张填同一个 Provider ID + 一个模型 id，点「试一下」——通了再「保存」。
+实测过的例子：加一家 `tokenrhythm`（`openai-completions`、`https://tokenrhythm.studio/v1`、
+key 用凭据名 `TOKENRHYTHM_API_KEY`、模型 `deepseek-v4.1-flash-1017`），点「试一下」回「在的」，6832ms。
 
 ### 省钱的三个杠杆（都实测过）
 

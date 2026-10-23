@@ -17,6 +17,7 @@ import { SELF_INSTRUCTION } from '../body/prompt.mjs';
 import { readProfileModel } from '../brain/model.mjs';
 import { createBrain } from '../brain/index.mjs';
 import { dshDefaults } from '../brain/headless.mjs';
+import { API_KINDS, providerIdOk, readCredentialRef, keyEnvName } from '../brain/model.mjs';
 
 const ORIGIN_OK = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 
@@ -35,6 +36,7 @@ const EDITABLE = [
   'brain.headless.chatProfile',
   'brain.headless.rotateAtTokens',
   'brain.headless.model',
+  'brain.headless.providers',
   'brain.headless.handover',
   'ack',
   'send.split',
@@ -216,6 +218,7 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
               cli: h.cli || d.cli,
               profile: h.profile || d.profile || 'headless',
               ...h,
+              providers: h.providers || {},
               model: { provider, model },
               timeoutMs: 60000,
             },
@@ -247,8 +250,73 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
             ? { provider: profileModel.provider, model: profileModel.model }
             : null,
           profileError: profileModel && profileModel.error ? String(profileModel.error) : null,
-          providers: PROVIDER_HINTS,
+          providers: Array.from(new Set([...PROVIDER_HINTS, ...((profileModel && profileModel.providers) || []), ...Object.keys(h.providers || {})])),
+          custom: Object.entries(h.providers || {}).map(([pid, pv]) => ({
+            id: pid,
+            displayName: (pv && pv.displayName) || pid,
+            api: (pv && pv.api) || 'openai-completions',
+            baseURL: (pv && pv.baseURL) || '',
+            models: ((pv && Array.isArray(pv.models)) ? pv.models : []).map((m) => (typeof m === 'string' ? m : (m && m.id) || '')).filter(Boolean),
+            hasKey: !!(pv && pv.apiKey) || !!(pv && pv.apiKeyRef && readCredentialRef(pv.apiKeyRef)),
+            keyFrom: pv && pv.apiKey ? '面板里填的' : (pv && pv.apiKeyRef ? `DSH 凭据 ${pv.apiKeyRef}` : '还没填'),
+          })),
+          apiKinds: API_KINDS,
         }, origin);
+      }
+
+      // ── 自己加的提供商（面板「模型」页那张表）──
+      // 加：{ id, displayName, api, baseURL, apiKey | apiKeyRef, models: [string|{id,name}] }
+      // 删：{ id, remove: true }
+      if (area === 'model' && req.method === 'POST' && id === 'provider') {
+        const body = await readBody(req);
+        const pid = String(body?.id || '').trim();
+        if (!providerIdOk(pid)) return json(res, 400, { error: 'Provider ID 要小写字母开头，只能有字母数字点划线（如 acme-gateway）' }, origin);
+
+        const h = cfg.brain?.headless || (cfg.brain = { ...(cfg.brain || {}), headless: {} }).headless;
+        const current = { ...(h.providers || {}) };
+
+        if (body?.remove === true) {
+          delete current[pid];
+        } else {
+          const api = API_KINDS.includes(body?.api) ? body.api : 'openai-completions';
+          const baseURL = String(body?.baseURL || '').trim();
+          if (!/^https?:\/\//i.test(baseURL)) return json(res, 400, { error: 'API 地址要以 http:// 或 https:// 开头' }, origin);
+          const rawModels = Array.isArray(body?.models) ? body.models : String(body?.models || '').split(/[,，\s]+/);
+          const models = rawModels
+            .map((m) => (typeof m === 'string' ? { id: m.trim() } : { id: String(m && m.id || '').trim(), name: m && m.name }))
+            .filter((m) => m.id)
+            .map((m) => ({ id: m.id, name: m.name || m.id }));
+          if (!models.length) return json(res, 400, { error: '至少填一个模型 id' }, origin);
+
+          const entry = {
+            displayName: String(body?.displayName || pid).trim() || pid,
+            api,
+            baseURL,
+            models,
+          };
+          // 密钥：面板里填了就用面板的；没填就沿用旧的，或者指向 DSH 凭据里的某个 ref
+          const key = String(body?.apiKey || '').trim();
+          if (key) entry.apiKey = key;
+          else if (current[pid] && current[pid].apiKey) entry.apiKey = current[pid].apiKey;
+          const ref = String(body?.apiKeyRef || '').trim();
+          if (!key && ref) entry.apiKeyRef = ref;
+          else if (!key && !ref && current[pid] && current[pid].apiKeyRef) entry.apiKeyRef = current[pid].apiKeyRef;
+          if (!entry.apiKey && !entry.apiKeyRef) entry.apiKeyRef = 'DEEPSEEK_API_KEY';   // 兜底：让他先去填
+          current[pid] = entry;
+        }
+
+        // 落盘 + 热生效（跟 /api/config 一条路：并进 config.local.json）
+        let local = {};
+        try { local = JSON.parse(fs.readFileSync(localFile, 'utf8')) || {}; } catch { local = {}; }
+        setPath(local, 'brain.headless.providers', current);
+        const tmp = `${localFile}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(local, null, 2), 'utf8');
+        fs.renameSync(tmp, localFile);
+        setPath(cfg, 'brain.headless.providers', current);
+        profileModel = null;   // 名单变了，下次 GET 重新读
+
+        logger?.info?.('web', `${body?.remove === true ? '删掉' : '加了'}提供商 ${pid}（密钥走环境变量 ${keyEnvName(pid)}）`);
+        return json(res, 200, { ok: true, id: pid, providers: Object.keys(current) }, origin);
       }
 
       if (area === 'config' && req.method === 'GET') {

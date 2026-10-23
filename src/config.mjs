@@ -134,6 +134,9 @@ const DEFAULTS = {
       // 一轮有几步，每步都要把整段历史重看一遍——会话越长越贵，所以要定期换。
       // 0 或负数 = 不换。
       rotateAtTokens: 60000,
+      // 自己加的提供商（面板「模型」页）：key 只存在本机 config.local.json，不写 DSH 凭据
+      // 形状：{ <id>: { displayName, api, baseURL, apiKey|apiKeyRef, models: [{id,name}] } }
+      providers: {},
       // 用哪个模型：{ provider, model }。留空（或 null）= 跟 DSH 那个 profile 的默认。
       // 填了就在起进程时用 --patch 叠一层，不改你 profile 目录里的文件。面板「用量」页能改。
       model: null,
