@@ -189,27 +189,19 @@ notebook/tmp/        临时
 「试一下」会真起一轮（问「只回两个字：在的」）：写错 provider 报 `NO_ADAPTER`，
 密钥没配好报 `MISSING_CREDENTIAL`。
 
-### 自己加提供商（中转站、自建网关都行）
+### 想用别的模型？在 DSH 里加一次就够了
 
-`llm-pi-ai` 那个适配器本身是通用的：只要对面说 OpenAI 或 Anthropic 那套协议，就能接。
-面板「模型」页下半张就是给这个用的，跟 DSH 设置里那个「自定义模型 API」一个意思：
+面板不再让你重填一遍地址和密钥。要接中转站、自建网关，去 DSH 设置里「添加提供商」加一家
+（Provider ID / 显示名称 / API 地址 / 协议 / 密钥 / 模型 id），存好之后回到面板「模型」页，
+它就会出现在「你 DSH 里已经配好的」那一排里，点一下、再点保存就切过去了。
 
-| 填什么 | 说明 |
-| --- | --- |
-| Provider ID | 小写字母开头，`a-z0-9._-`，它同时决定环境变量名（`QAD_LLM_KEY_<ID>`） |
-| 显示名称 | 只用来在列表里好看 |
-| API 地址 | 到 `/v1` 那一层，如 `https://gateway.example/v1` |
-| API 协议 | `openai-completions` / `openai-responses` / `anthropic-messages` |
-| API 密钥 | 填在这里 = 只存本机 `config.local.json`；也可以填**DSH 凭据里的名字**（如 `TOKENRHYTHM_API_KEY`）复用它 |
-| 模型 id | 逗号分开，至少一个 |
+面板不复制你的密钥：那一轮起进程时按 `apiKeyEnv` 原来的名字，从 `~/.dsh/.credentials.yaml`
+里取出来塞进子进程环境变量，用完即走。
 
-它做的事：把这几家写进 `data/model-patch.yml` 的 `llm-pi-ai.providers` 里，**密钥不进 DSH 凭据文件**，
-起子进程时用环境变量喂进去。所以：不用改你的 profile、不用往 `.credentials.yaml` 里塞东西，
-删掉这家就是把这行从面板里删掉。
-
-填完在「模型」页上半张填同一个 Provider ID + 一个模型 id，点「试一下」——通了再「保存」。
-实测过的例子：加一家 `tokenrhythm`（`openai-completions`、`https://tokenrhythm.studio/v1`、
-key 用凭据名 `TOKENRHYTHM_API_KEY`、模型 `deepseek-v4.1-flash-1017`），点「试一下」回「在的」，6832ms。
+> 为什么是“读文件”而不是问 DSH：`desktop` 那个 profile 被 Electron 独占，
+> `dsh --profile desktop --dump-config` 会直接拒（`profile "desktop" is managed exclusively
+> by the Electron application`），所以只能读 `~/.dsh/profiles/*/cordis.patch.yml` 里
+> `llm-pi-ai.config.providers` 那一段。
 
 ### 省钱的三个杠杆（都实测过）
 

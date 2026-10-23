@@ -795,47 +795,6 @@ window.__ModuleLoader__.load({
           setTesting(false);
         }
       };
-      // 自己加的提供商（Base URL / 协议 / 密钥 / 模型 id），见 src/brain/model.mjs
-      const BLANK = { id: '', displayName: '', api: 'openai-completions', baseURL: '', apiKey: '', apiKeyRef: '', models: '' };
-      const [pf, setPf] = useState(BLANK);
-      const [pfMsg, setPfMsg] = useState('');
-      const [pfBusy, setPfBusy] = useState(false);
-      const saveProvider = async () => {
-        setPfBusy(true);
-        setPfMsg('');
-        try {
-          const ids = String(pf.models || '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
-          await api('/api/model/provider', {
-            method: 'POST',
-            body: JSON.stringify({
-              id: pf.id.trim(),
-              displayName: pf.displayName.trim(),
-              api: pf.api,
-              baseURL: pf.baseURL.trim(),
-              apiKey: pf.apiKey.trim(),
-              apiKeyRef: pf.apiKeyRef.trim(),
-              models: ids,
-            }),
-          });
-          setPfMsg('加好了：' + pf.id.trim() + '（密钥走环境变量，不写进 DSH 凭据）');
-          setPf(BLANK);
-          await loadModel();
-        } catch (e) {
-          setPfMsg('没加成：' + e.message);
-        } finally {
-          setPfBusy(false);
-        }
-      };
-      const removeProvider = async (pid) => {
-        setPfMsg('');
-        try {
-          await api('/api/model/provider', { method: 'POST', body: JSON.stringify({ id: pid, remove: true }) });
-          setPfMsg('删掉了：' + pid);
-          await loadModel();
-        } catch (e) {
-          setPfMsg('没删掉：' + e.message);
-        }
-      };
       useEffect(() => { loadModel(); }, []);
       return h('div', null,
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
@@ -939,75 +898,13 @@ window.__ModuleLoader__.load({
           h('div', { style: S.tiny },
             '注意：能用的 provider 取决于这个 profile 装了哪些适配器。写错了她下一句会回 NO_ADAPTER / MISSING_CREDENTIAL —— 先点「试一下」。'),
         ),
-        // ── 自己加提供商（跟 DSH 那个「自定义模型 API」一个意思）──
-        h('div', { style: { marginTop: 14, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,.08)', display: 'flex', flexDirection: 'column', gap: 6 } },
-          h('div', { style: { fontSize: 13, fontWeight: 600 } }, '自己加一个提供商'),
+        h('div', { style: { ...S.card, marginTop: 14 } },
+          h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, '想用别的模型？在 DSH 里加一次就行'),
           h('div', { style: S.tiny },
-            '填中转站或自建网关都行，只要它说 OpenAI / Anthropic 那套协议。密钥只留在这台机器的 config.local.json 里，起进程时用环境变量喂给她，不写进 DSH 的凭据文件。'),
-          ((modelInfo && modelInfo.custom) || []).map((c) =>
-            h('div', { key: c.id, style: S.item },
-              h('div', { style: { flex: 1 } },
-                h('div', null, c.displayName + '（' + c.id + '）'),
-                h('div', { style: S.tiny }, c.api + ' · ' + c.baseURL + ' · 模型 ' + (c.models.join(', ') || '（没填）') + ' · 密钥：' + c.keyFrom),
-              ),
-              h('button', { style: S.btn(false), onClick: () => { const m = c.models[0] || ''; setPf({ ...BLANK, id: '', }); setModel({ provider: c.id, model: m }); } }, '用它'),
-              h('button', { style: S.btn(false), onClick: () => removeProvider(c.id) }, '删掉'),
-            ),
-          ),
-          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 4 } },
-            h('input', {
-              value: pf.id,
-              placeholder: 'Provider ID（小写，如 acme-gateway）',
-              style: { ...S.input, width: 220 },
-              onChange: (e) => setPf({ ...pf, id: e.target.value }),
-            }),
-            h('input', {
-              value: pf.displayName,
-              placeholder: '显示名称（可省）',
-              style: { ...S.input, width: 170 },
-              onChange: (e) => setPf({ ...pf, displayName: e.target.value }),
-            }),
-          ),
-          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
-            h('input', {
-              value: pf.baseURL,
-              placeholder: 'API 地址，如 https://gateway.example/v1',
-              style: { ...S.input, width: 320 },
-              onChange: (e) => setPf({ ...pf, baseURL: e.target.value }),
-            }),
-            h('select', {
-              value: pf.api,
-              style: { ...S.input, width: 200 },
-              onChange: (e) => setPf({ ...pf, api: e.target.value }),
-            }, ((modelInfo && modelInfo.apiKinds) || ['openai-completions']).map((k) => h('option', { key: k, value: k }, k))),
-          ),
-          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
-            h('input', {
-              value: pf.apiKey,
-              type: 'password',
-              placeholder: 'API 密钥（填了就用它）',
-              style: { ...S.input, width: 240 },
-              onChange: (e) => setPf({ ...pf, apiKey: e.target.value }),
-            }),
-            h('input', {
-              value: pf.apiKeyRef,
-              placeholder: '或者：DSH 凭据里的名字，如 TOKENRHYTHM_API_KEY',
-              style: { ...S.input, width: 280 },
-              onChange: (e) => setPf({ ...pf, apiKeyRef: e.target.value }),
-            }),
-          ),
-          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
-            h('input', {
-              value: pf.models,
-              placeholder: '模型 id，逗号分开，如 deepseek-v4.1-flash-1017',
-              style: { ...S.input, width: 380 },
-              onChange: (e) => setPf({ ...pf, models: e.target.value }),
-            }),
-            h('button', { style: S.btn(pfBusy), onClick: saveProvider }, pfBusy ? '保存中…' : '加上'),
-          ),
-          pfMsg ? h('div', { style: S.tiny }, pfMsg) : null,
-          h('div', { style: S.tiny },
-            '加完在下面那个框里填它的 provider / model 再点「试一下」；通了就点「保存」，她下一句就用这家。'),
+            '这个面板不用再单独填一遍地址和密钥：去 DSH 设置里「添加提供商」加一家（中转站、自建网关都行），',
+            '存好之后回到这一页，它就会出现在上面那份「你 DSH 里已经配好的」列表里，点一下就能选。'),
+          h('div', { style: { ...S.tiny, marginTop: 4 } },
+            '列表里没有？点「刷新」重读一次（面板右上角那份配置会在 1 分钟内缓存，刷新会强制重读）。'),
         ),
       );
     }
