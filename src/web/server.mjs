@@ -213,7 +213,19 @@ const pair = (m) => (m && String(m.provider || '').trim() && String(m.model || '
         const body = await readBody(req);
         const provider = String(body?.provider || '').trim();
         const model = String(body?.model || '').trim();
+        const slot = String(body?.slot || 'chat').trim();
         if (!provider || !model) return json(res, 400, { error: 'provider 和 model 都得填' }, origin);
+        // 看图槽位要真拿一张图试：只问"在的"是看不出它收不收图的。
+        // 模型不是都能收图——DSH 会先看模型声明的能力，不收就直接回
+        // `model "x" does not declare image input`（2026-10-23 就是这么"打不开"的）。
+        let testImage = '';
+        if (slot === 'vision') {
+          try {
+            const dir = path.join(ROOT, 'data', 'stickers', 'library');
+            const f = fs.readdirSync(dir).find((n) => /\.(png|jpe?g|gif|webp)$/i.test(n));
+            if (f) testImage = path.join(dir, f);
+          } catch { /* 没有表情库就退回纯文字测试 */ }
+        }
         const h = cfg.brain?.headless || {};
         const d = dshDefaults();
         const probe = createBrain({
@@ -231,9 +243,20 @@ const pair = (m) => (m && String(m.provider || '').trim() && String(m.model || '
           },
         }, (tag, msg) => logger?.info?.(tag, msg));
         const t0 = Date.now();
+        const prompt = testImage
+          ? `用 read_image 打开这张图：${testImage}
+然后只用一句话说图里是什么。`
+          : '只回两个字：在的';
         try {
-          const r = await probe.run({ prompt: '只回两个字：在的' });
-          return json(res, 200, { ok: true, ms: Date.now() - t0, text: String(r?.text || '').slice(0, 80) }, origin);
+          const r = await probe.run({ prompt });
+          const text = String(r?.text || '');
+          // 她要是在自己嘴里把 read_image 的报错念出来，就等于没试成
+          const blind = /does not declare image input|不支持图像|不支持图片/i.test(text);
+          return json(res, 200, {
+            ok: !blind, ms: Date.now() - t0, text: text.slice(0, 160),
+            ...(blind ? { error: '这个模型收不了图（read_image 会被拒）' } : {}),
+            ...(testImage ? { tested: 'image' } : {}),
+          }, origin);
         } catch (e) {
           return json(res, 200, { ok: false, ms: Date.now() - t0, error: String(e?.message || e).slice(0, 400) }, origin);
         }

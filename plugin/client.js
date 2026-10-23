@@ -802,7 +802,12 @@ window.__ModuleLoader__.load({
         try {
           const r = await api('/api/model/test', {
             method: 'POST',
-            body: JSON.stringify({ provider: (model.provider || '').trim(), model: (model.model || '').trim() }),
+            body: JSON.stringify({
+              provider: (model.provider || '').trim(),
+              model: (model.model || '').trim(),
+              // 看图槽位要拿真图试——只问一句"在的"分不出它收不收图
+              slot: active,
+            }),
           });
           setModelTest(r);
         } catch (e) {
@@ -875,7 +880,8 @@ window.__ModuleLoader__.load({
               onChange: (e) => setModel({ ...model, model: e.target.value }),
             }),
             h('button', { style: S.btn(false), onClick: () => saveModel() }, '保存'),
-            h('button', { style: S.btn(testing), onClick: testModel }, testing ? '试跑中…' : '试一下'),
+            h('button', { style: S.btn(testing), onClick: testModel },
+              testing ? '试跑中…' : (active === 'vision' ? '拿一张图试一下' : '试一下')),
             h('button', { style: S.btn(false), onClick: () => { const empty = { provider: '', model: '' }; setModel(empty); saveModel(empty); } }, '恢复默认'),
           ),
           // 他本机 DSH 里已经配好的（读 profile 文件来的）——做成一眼就知道能点的样子

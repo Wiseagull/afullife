@@ -959,6 +959,17 @@ async function handleBatch(roomKey, msgs) {
     (Array.isArray(recent) && recent.some((e) => Array.isArray(e.videoFiles) && e.videoFiles.length));
   if (batchVideos) prompt += String.fromCharCode(10) + videoHint();
 
+  // 这一轮带图就换成「看图」那个模型（面板里可填别的）。
+  // 为什么需要：模型不是都能收图——DSH 的 read_image 会先问模型的声明，
+  // 不支持就直接报 `model "x" does not declare image input`，她只能干看着
+  // （2026-10-23 晚上就是这么"打不开"的：对话槽位填的是中转站模型）。
+  // 见 config.local.json 的 brain.headless.visionModel。
+  const visionSlot = cfg.brain?.headless?.visionModel || null;
+  const turnModel = batchImages.size && visionSlot ? visionSlot : null;
+  if (turnModel) {
+    L('brain', `这一轮带 ${batchImages.size} 张图，用看图槽位 ${turnModel.provider}/${turnModel.model}`);
+  }
+
   const fromOwnerEarly = isRoot(last.from);
   if (!fromOwnerEarly) {
     prompt += '\n\n' + NOPOWER_HINT;
@@ -1027,12 +1038,13 @@ async function handleBatch(roomKey, msgs) {
     return onEvent(ev);
   };
   try {
-    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, profile: turnProfile });
+    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, profile: turnProfile, model: turnModel });
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       const b = gate.blocked;
       awaiting = {
         roomKey, msgs, last, prompt, sid,
+        model: turnModel,
         tool: b.tool, input: b.input, verdict: b.verdict, at: Date.now(),
       };
       L('gate', `停在这一步，等他点头：${b.verdict.why}`);
@@ -1055,6 +1067,7 @@ async function handleBatch(roomKey, msgs) {
         room: roomKey,
         onEvent,
         profile: turnProfile,
+        model: turnModel,
       });
     } catch (err2) {
       if (err2?.code === 'GATE_BLOCKED' && gate.blocked) {
@@ -1063,6 +1076,7 @@ async function handleBatch(roomKey, msgs) {
           roomKey, msgs, last,
           prompt: promptFresh,
           sid: null,
+          model: turnModel,
           tool: b.tool, input: b.input, verdict: b.verdict, at: Date.now(),
         };
         L('gate', `停在这一步，等他点头：${b.verdict.why}`);
@@ -1236,7 +1250,7 @@ async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
 async function rerunApproved(a) {
   const onEvent = makeOnEvent(a.roomKey);
   try {
-    const result = await brain.run({ prompt: a.prompt, sessionId: a.sid, room: a.roomKey, onEvent });
+    const result = await brain.run({ prompt: a.prompt, sessionId: a.sid, room: a.roomKey, onEvent, model: a.model || null });
     await finishTurn(a.roomKey, a.last, result, [], []);
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
