@@ -17,7 +17,7 @@ import { SELF_INSTRUCTION } from '../body/prompt.mjs';
 import { readProfileModel } from '../brain/model.mjs';
 import { createBrain } from '../brain/index.mjs';
 import { dshDefaults } from '../brain/headless.mjs';
-import { API_KINDS, providerIdOk, readCredentialRef, keyEnvName } from '../brain/model.mjs';
+import { API_KINDS, providerIdOk, readCredentialRef, keyEnvName, readDshProviders } from '../brain/model.mjs';
 
 const ORIGIN_OK = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 
@@ -218,7 +218,7 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
               cli: h.cli || d.cli,
               profile: h.profile || d.profile || 'headless',
               ...h,
-              providers: h.providers || {},
+              providers: { ...readDshProviders(), ...(h.providers || {}) },
               model: { provider, model },
               timeoutMs: 60000,
             },
@@ -261,6 +261,33 @@ export function startWeb({ usageStore, cfg, logger, notes, pending, events, sess
             keyFrom: pv && pv.apiKey ? '面板里填的' : (pv && pv.apiKeyRef ? `DSH 凭据 ${pv.apiKeyRef}` : '还没填'),
           })),
           apiKinds: API_KINDS,
+          known: (() => {
+            const out = [];
+            for (const [pid, pv] of Object.entries(readDshProviders())) {
+              out.push({
+                id: pid,
+                displayName: (pv && pv.displayName) || pid,
+                api: (pv && pv.api) || 'openai-completions',
+                baseURL: (pv && pv.baseURL) || '',
+                models: ((pv && pv.models) || []).map((m) => (typeof m === 'string' ? m : (m && m.id) || '')).filter(Boolean),
+                from: `DSH 里已有（${(pv && pv.fromProfile) || 'profile'}）`,
+                hasKey: !!(pv && (pv.apiKey || readCredentialRef(pv.apiKeyEnv || '') || readCredentialRef(pv.apiKeyRef || ''))),
+              });
+            }
+            for (const [pid, pv] of Object.entries(h.providers || {})) {
+              if (out.some((x) => x.id === pid)) continue;
+              out.push({
+                id: pid,
+                displayName: (pv && pv.displayName) || pid,
+                api: (pv && pv.api) || 'openai-completions',
+                baseURL: (pv && pv.baseURL) || '',
+                models: ((pv && Array.isArray(pv.models)) ? pv.models : []).map((m) => (typeof m === 'string' ? m : (m && m.id) || '')).filter(Boolean),
+                from: '面板里加的',
+                hasKey: !!(pv && (pv.apiKey || readCredentialRef(pv.apiKeyRef || '') || readCredentialRef(pv.apiKeyEnv || ''))),
+              });
+            }
+            return out;
+          })(),
         }, origin);
       }
 

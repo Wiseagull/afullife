@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ROOT } from '../config.mjs';
-import { writeModelPatch, providerEnv } from './model.mjs';
+import { writeModelPatch, providerEnv, readDshProviders } from './model.mjs';
 
 /**
  * 默认从"正在跑我自己的这个进程"推：
@@ -123,10 +123,12 @@ export class HeadlessBrain {
     // 指定了模型就先叠一层 patch。注意：带 --patch 时 profile 必须用 --profile 显式给，
     // 写成位置参数（dsh --patch x headless）会被拒：--profile <name> is required。
     // 面板里加的自定义提供商也算在同一份 patch 里（它们的 key 走环境变量，不进 DSH 凭据）
-    const extraEnv = providerEnv(this.cfg.providers || {});
+    // 提供商三路合起来：下载者本机 DSH 里已有的（desktop 里加的中转站）+ 面板里自己加的
+    const providers = { ...readDshProviders(), ...(this.cfg.providers || {}) };
+    const extraEnv = providerEnv(providers);
     const patch = writeModelPatch(path.join(ROOT, 'data'), {
       ...(this.cfg.model || {}),
-      providers: this.cfg.providers || {},
+      providers,
     });
     const prof = profile || this.cfg.profile;
     if (patch) args.push('--patch', patch, '--profile', prof, '--json');

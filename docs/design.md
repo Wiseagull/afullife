@@ -172,22 +172,22 @@ notebook/tmp/        临时
   想查更细的让她跑 `node scripts/usage.mjs`（一周：`node scripts/usage.mjs 7`）
 - 这里只做**可见性**，不做硬上限——要不要让她活跃、活跃到什么程度，由你决定
 
-### 她用什么模型：面板里换
+### 她用什么模型：面板「模型」页换
 
 默认跟着 DSH 的 `headless` profile 走（没额外配置时是 `deepseek-official / deepseek-flash`）。
-面板「用量」页有一张「她用什么模型」的卡：
+面板「模型」页有三个来源，优先级从低到高：
 
-- 读的是 profile 的真值（`dsh --profile headless --dump-config` 里 `agent-default-model` 那一段），
-  所以改过 profile 之后点「刷新」就是新的，不用回来改代码
-- 填了 `provider` + `model` 就存进 `config.local.json` 的 `brain.headless.model`；**不填就等于用 profile 默认**
-- 保存后不用重启桥：每轮起 headless 时现写一个 `data/model-patch.yml`，
-  用 `--patch` 叠在 profile 之上（所以它压过 profile 里那份）
-- 卡上「试一下」会真起一轮，把毫秒数和回答打出来——写错了会当场报
-  `NO_ADAPTER: no adapter registered for provider "xxx"`
+1. **profile 默认**——`~/.dsh/profiles/headless` 里写的 `agent-default-model`；
+2. **你 DSH 里已经配好的**——设置里加过的中转站、自建网关，面板会列出来，每家的模型 id 是一颗颗按钮，
+   点一下就把上面两格填好。怎么做到的：这些提供商写在 `~/.dsh/profiles/*/cordis.patch.yml` 的
+   `llm-pi-ai.config.providers` 里，密钥在 `~/.dsh/.credentials.yaml` 的 `refs`，面板直接读这两处，
+   **不复制你的密钥**（`desktop` 那个 profile 被 Electron 独占，`--dump-config` 会拒，所以只能读文件）；
+3. **面板里自己加的**——见下一节。
 
-**能选哪些**：只有 profile 里装了适配器的才能用。默认的 `headless` profile 只带 deepseek
-（`llm-deepseek` / `llm-deepseek-account` / `llm-pi-ai`），所以直接填 `tokenrhythm`、`aicost`、`glm`
-这类名字会得到 `NO_ADAPTER`。
+选了哪一项，就在每轮起进程时叠一层 `data/model-patch.yml`（`--patch` 压在 profile 之上），
+你 profile 目录里的文件一个字都不动。保存后不用重启桥。
+「试一下」会真起一轮（问「只回两个字：在的」）：写错 provider 报 `NO_ADAPTER`，
+密钥没配好报 `MISSING_CREDENTIAL`。
 
 ### 自己加提供商（中转站、自建网关都行）
 

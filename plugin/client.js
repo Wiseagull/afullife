@@ -873,6 +873,36 @@ window.__ModuleLoader__.load({
             h('button', { style: S.btn(testing), onClick: testModel }, testing ? '试跑中…' : '试一下'),
             h('button', { style: S.btn(false), onClick: () => { const empty = { provider: '', model: '' }; setModel(empty); saveModel(empty); } }, '恢复默认'),
           ),
+          // 他本机 DSH 里已经配好的（读 profile 文件来的），点一下填进上面两格
+          modelInfo && modelInfo.known && modelInfo.known.length
+            ? h('div', { style: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 } },
+              h('div', { style: S.tiny }, '你 DSH 里已经配好的 —— 点一下填到上面，再点「保存」：'),
+              modelInfo.known.map((k) => h('div', {
+                key: k.id,
+                style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' },
+              },
+                h('span', { style: { ...S.tiny, minWidth: 130 }, title: k.from + ' ' + (k.baseURL || '') },
+                  k.id + (k.hasKey ? '' : '（没找到密钥）')),
+                (k.models && k.models.length ? k.models : ['（这家没写模型，手动填）']).map((m) => h('button', {
+                  key: m,
+                  title: (k.baseURL || '') + ' · ' + k.from,
+                  style: {
+                    ...S.tiny,
+                    padding: '2px 8px',
+                    borderRadius: 10,
+                    border: '1px solid #3a3f4b',
+                    background: 'transparent',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                  },
+                  onClick: () => setModel({
+                    provider: k.id,
+                    model: m.startsWith('（这家没写模型') ? '' : m,
+                  }),
+                }, m)),
+              )),
+            )
+            : null,
           modelMsg ? h('div', { style: S.tiny }, modelMsg) : null,
           modelTest
             ? h('div', { style: S.tiny },
