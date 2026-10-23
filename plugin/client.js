@@ -574,48 +574,6 @@ window.__ModuleLoader__.load({
       const [rotateMsg, setRotateMsg] = useState('');
       const [handover, setHandover] = useState({ enabled: true, inner: true });
       const [handoverMsg, setHandoverMsg] = useState('');
-      // 模型：留空 = 跟 profile 默认。见 src/brain/model.mjs
-      const [model, setModel] = useState({ provider: '', model: '' });
-      const [modelInfo, setModelInfo] = useState(null);
-      const [modelMsg, setModelMsg] = useState('');
-      const [modelTest, setModelTest] = useState(null);
-      const [testing, setTesting] = useState(false);
-      const loadModel = () => api('/api/model')
-        .then((r) => {
-          setModelInfo(r);
-          if (r && r.chosen) setModel({ provider: r.chosen.provider || '', model: r.chosen.model || '' });
-        })
-        .catch(() => {});
-      const saveModel = async (next) => {
-        const want = next || model;
-        setModelMsg('');
-        setModelTest(null);
-        try {
-          const pair = (want.provider || '').trim() && (want.model || '').trim()
-            ? { provider: want.provider.trim(), model: want.model.trim() }
-            : null;
-          await api('/api/config', { method: 'POST', body: JSON.stringify({ brain: { headless: { model: pair } } }) });
-          setModelMsg(pair ? '存好了，下一句就用它' : '存好了，回到 profile 默认');
-          await loadModel();
-        } catch (e) {
-          setModelMsg('没存上：' + e.message);
-        }
-      };
-      const testModel = async () => {
-        setTesting(true);
-        setModelTest(null);
-        try {
-          const r = await api('/api/model/test', {
-            method: 'POST',
-            body: JSON.stringify({ provider: (model.provider || '').trim(), model: (model.model || '').trim() }),
-          });
-          setModelTest(r);
-        } catch (e) {
-          setModelTest({ ok: false, error: e.message });
-        } finally {
-          setTesting(false);
-        }
-      };
       const saveHandover = async (patch) => {
         const next = Object.assign({}, handover, patch);
         setHandover(next);
@@ -659,7 +617,7 @@ window.__ModuleLoader__.load({
           if (r && r.currency) setCurrency(r.currency);
         })
         .catch((e) => setErr(e.message));
-      useEffect(() => { load(); loadRotate(); loadModel(); }, []);
+      useEffect(() => { load(); loadRotate(); }, []);
       const savePrice = async () => {
         setSaving(true);
         setPriceMsg('');
@@ -790,8 +748,56 @@ window.__ModuleLoader__.load({
             handoverMsg ? h('div', { style: S.tiny }, handoverMsg) : null,
           ),
         ),
-        // ── 她用什么模型 ──
-        h('div', { style: { marginTop: 14, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,.08)' } },
+      );
+    }
+
+    // ── 模型：她现在用的是哪个，能不能换 ─────────────────────────────────
+    function ModelTab() {
+      // 模型：留空 = 跟 profile 默认。见 src/brain/model.mjs
+      const [model, setModel] = useState({ provider: '', model: '' });
+      const [modelInfo, setModelInfo] = useState(null);
+      const [modelMsg, setModelMsg] = useState('');
+      const [modelTest, setModelTest] = useState(null);
+      const [testing, setTesting] = useState(false);
+      const loadModel = () => api('/api/model')
+        .then((r) => {
+          setModelInfo(r);
+          if (r && r.chosen) setModel({ provider: r.chosen.provider || '', model: r.chosen.model || '' });
+        })
+        .catch(() => {});
+      const saveModel = async (next) => {
+        const want = next || model;
+        setModelMsg('');
+        setModelTest(null);
+        try {
+          const pair = (want.provider || '').trim() && (want.model || '').trim()
+            ? { provider: want.provider.trim(), model: want.model.trim() }
+            : null;
+          await api('/api/config', { method: 'POST', body: JSON.stringify({ brain: { headless: { model: pair } } }) });
+          setModelMsg(pair ? '存好了，下一句就用它' : '存好了，回到 profile 默认');
+          await loadModel();
+        } catch (e) {
+          setModelMsg('没存上：' + e.message);
+        }
+      };
+      const testModel = async () => {
+        setTesting(true);
+        setModelTest(null);
+        try {
+          const r = await api('/api/model/test', {
+            method: 'POST',
+            body: JSON.stringify({ provider: (model.provider || '').trim(), model: (model.model || '').trim() }),
+          });
+          setModelTest(r);
+        } catch (e) {
+          setModelTest({ ok: false, error: e.message });
+        } finally {
+          setTesting(false);
+        }
+      };
+      useEffect(() => { loadModel(); }, []);
+      return h('div', null,
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
           h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, '她用什么模型'),
           h('div', { style: S.tiny },
             '留空两格 = 跟 DSH 那个 headless profile 的默认。填了就在每轮起进程时叠一层 patch，不动你 profile 目录里的文件。'),
@@ -1275,6 +1281,7 @@ window.__ModuleLoader__.load({
         ['persona', '人设'],
         ['pending', '待确认'],
         ['usage', '用量'],
+        ['model', '模型'],
         ['events', '事件'],
         ['sessions', '会话'],
       ];
@@ -1332,6 +1339,7 @@ window.__ModuleLoader__.load({
         tab === 'persona' ? (cfg ? h(PersonaTab, { cfg, set: setCfg }) : h('div', { style: S.tiny }, '读取配置中…')) : null,
         tab === 'pending' ? h(PendingTab) : null,
         tab === 'usage' ? h(UsageTab) : null,
+        tab === 'model' ? h(ModelTab) : null,
         tab === 'events' ? h(EventsTab) : null,
         tab === 'sessions' ? h(SessionsTab) : null,
       );
