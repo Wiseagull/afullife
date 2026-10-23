@@ -42,3 +42,6 @@ sd-auto-mask.py
 
 # 人设（persona/*.md）故意不挡：仓库里带一份能直接用的默认人设，
 # self.md 是空的，留给她自己写。
+
+# 踩坑便签：装好之后自己和 bot 边跑边攒的，不进仓库（_模板.md 留着）
+procedures/_inbox.md

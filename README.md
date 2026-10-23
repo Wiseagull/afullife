@@ -162,6 +162,7 @@ node scripts/update.mjs --check  # 只看有没有新版，不改任何东西
 | 它到底是什么、各部件怎么运作、为什么这么设计 | [docs/design.md](docs/design.md) |
 | 模块与文件地图（谁调谁） | [docs/architecture.md](docs/architecture.md) |
 | 做完了什么、还差什么、什么明确不做 | [docs/roadmap.md](docs/roadmap.md) |
+| 命令行小工具都有哪些、各管什么 | [docs/scripts.md](docs/scripts.md) |
 | 哪些是代码、哪些是你的东西、换台电脑带什么 | [docs/user-vs-project.md](docs/user-vs-project.md) |
 | 安全边界、它碰你哪些目录、怎么报漏洞 | [SECURITY.md](SECURITY.md) |
 | 人设三层怎么分工、怎么改 | [persona/README.md](persona/README.md) |
