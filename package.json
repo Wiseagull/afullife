@@ -1,6 +1,6 @@
 {
   "name": "afullife",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "type": "module",
   "description": "把 QQ 接进 DeepSeek Harness：一个身份、一份记忆，横跨 QQ 和 DSH。",
