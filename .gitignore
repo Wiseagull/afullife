@@ -26,7 +26,9 @@ notebook/notes/*
 notebook/memories/*
 notebook/archive/*
 notebook/tmp/*
-!notebook/*/.gitkeep
+!/notebook/*/.gitkeep
+# 索引是她本机跑 node scripts/notebook.mjs index 生出来的，别进仓库
+/notebook/INDEX.md
 
 # 产物：她画的图、别人发的表情原图
 /SD-Picture/

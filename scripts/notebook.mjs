@@ -5,6 +5,7 @@
 //   node scripts/notebook.mjs read [--days=3] [--file=notes/2026-10-21.md]
 //   node scripts/notebook.mjs find <词>
 //   node scripts/notebook.mjs stat
+//   node scripts/notebook.mjs index     重建 INDEX.md（每条一行：原文一截 + 门牌）
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, notebookDir } from '../src/config.mjs';
@@ -63,7 +64,8 @@ if (!cmd || cmd === 'help') {
   read [--days=3]          读最近几天的
   read --file=notes/2026-10-21.md     读某个文件
   find <词>                全文找
-  stat                     多大、有几页`);
+  stat                     多大、有几页
+  index                    重建 INDEX.md（每条一行，带 file:line 门牌）`);
   process.exit(0);
 }
 
@@ -114,6 +116,7 @@ if (cmd === 'find') {
   let hit = 0;
   for (const f of walk(DIR)) {
     if (!/\.(md|txt|json)$/i.test(f)) continue;
+    if (path.basename(f) === 'INDEX.md') continue; // 索引是门牌，不是原文，别重复命中
     const lines = fs.readFileSync(f, 'utf8').split(/\r?\n/);
     lines.forEach((line, i) => {
       if (line.includes(words)) {
@@ -127,7 +130,7 @@ if (cmd === 'find') {
 }
 
 if (cmd === 'stat') {
-  const files = walk(DIR).filter((f) => !f.endsWith('README.md'));
+  const files = walk(DIR).filter((f) => !/(^|\/)(README|INDEX)\.md$/.test(f.replace(/\\/g, '/')));
   const size = dirSize(DIR);
   console.log(`小本本：${files.length} 个文件，${(size / 1024).toFixed(1)}KB / 上限 20GB`);
   const byDir = {};
@@ -139,5 +142,98 @@ if (cmd === 'stat') {
   process.exit(0);
 }
 
-console.error('只认 write / read / find / stat');
+// 索引层：只许指路，不许生产内容。
+// 每一条都是原文的一截（截断，不改写）+ 指回原文的门牌 file:line。
+// 拿不准的地方宁可留"（标题）"，也不要概括——概括过的门牌会让人以为找过了。
+const KEY_MAX = 46;
+
+function keyOf(text) {
+  let s = String(text).replace(/\s+/g, ' ').trim();
+  // 有的条目开头连着好几个时间戳，剥掉，别让它占了正文的位置
+  for (let i = 0; i < 3; i += 1) {
+    const m = s.match(/^\d{1,2}:\d{2}(\s*[-~—]\s*\d{1,2}:\d{2})?\s+/);
+    if (!m) break;
+    s = s.slice(m[0].length);
+  }
+  // 只取第一句：逗号留着，句号/冒号/分号之后就是另一件事了
+  const cut = s.split(/[。；]/)[0];
+  const one = (cut || s).trim();
+  // 按码点切，不按 UTF-16 码元切：正好切在 emoji 的代理对中间会切出半个字
+  const cps = Array.from(one);
+  return cps.length > KEY_MAX ? `${cps.slice(0, KEY_MAX).join('')}…` : one;
+}
+
+if (cmd === 'index') {
+  const skip = new Set(['README.md', 'INDEX.md']);
+  const files = walk(DIR)
+    .filter((f) => /\.md$/i.test(f) && !skip.has(path.basename(f)))
+    .sort();
+
+  const groups = [];
+  let total = 0;
+  for (const f of files) {
+    const rel = path.relative(DIR, f).replace(/\\/g, '/');
+    const lines = fs.readFileSync(f, 'utf8').split(/\r?\n/);
+    const rows = [];
+    const bodyAt = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      const n = i + 1;
+      const bullet = line.match(/^\s*-\s+(\d{1,2}:\d{2})\s+(.*)$/);
+      if (bullet) {
+        const key = keyOf(bullet[2]);
+        if (key) rows.push({ time: bullet[1], key, n });
+        continue;
+      }
+      const heading = line.match(/^(#{1,3})\s+(.*\S)\s*$/);
+      if (heading && heading[1].length > 1) {
+        rows.push({ time: '', key: `〔${heading[2]}〕`, n, section: true });
+        continue;
+      }
+      if (line.trim() && !line.startsWith('#')) bodyAt.push(i);
+    }
+    // 一条门牌都没落下（整篇是段落，或者 bullet 不是时间格式）：退回首段第一句。
+    // 宁可只留一句，也别让这份文件从索引里整个消失。
+    if (!rows.length && bodyAt.length) {
+      const i = bodyAt[0];
+      const key = keyOf(lines[i].replace(/^[-*>]\s+/, ''));
+      if (key) rows.push({ time: '', key, n: i + 1 });
+    }
+    if (!rows.length) continue;
+    total += rows.length;
+    // 排法：notes（新的在前）→ memories → 其他（archive/tmp）
+    const rank = rel.startsWith('notes/') ? 0 : rel.startsWith('memories/') ? 1 : 2;
+    groups.push({ rel, rows, rank });
+  }
+
+  const d = new Date();
+  const p = (x) => String(x).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+
+  const out = [
+    '# 小本本索引',
+    '',
+    '> 每行 = 原文的一截 + 指回原文的门牌。**只许指路，不许生产内容**：',
+    '> 这里的字都是从原文截的，不是概括；要细节就按 `file:line` 回去读那一行。',
+    '> 改了原文就重建：`node scripts/notebook.mjs index`',
+    '',
+    `共 ${total} 条 / ${groups.length} 个文件 · 生成于 ${stamp}`,
+    '',
+  ];
+  for (const g of groups.sort((a, b) => a.rank - b.rank || b.rel.localeCompare(a.rel))) {
+    out.push(`## ${g.rel}  (${g.rows.length})`);
+    for (const r of g.rows) {
+      const head = r.time ? `${r.time}  ` : '';
+      out.push(`- ${head}${r.key}  → ${g.rel}:${r.n}`);
+    }
+    out.push('');
+  }
+
+  const file = path.join(DIR, 'INDEX.md');
+  fs.writeFileSync(file, out.join('\n'), 'utf8');
+  console.log(`索引重建：${total} 条 / ${groups.length} 个文件 → ${path.relative(DIR, file)}`);
+  process.exit(0);
+}
+
+console.error('只认 write / read / find / stat / index');
 process.exit(1);
