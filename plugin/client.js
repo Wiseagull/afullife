@@ -873,34 +873,60 @@ window.__ModuleLoader__.load({
             h('button', { style: S.btn(testing), onClick: testModel }, testing ? '试跑中…' : '试一下'),
             h('button', { style: S.btn(false), onClick: () => { const empty = { provider: '', model: '' }; setModel(empty); saveModel(empty); } }, '恢复默认'),
           ),
-          // 他本机 DSH 里已经配好的（读 profile 文件来的），点一下填进上面两格
+          // 他本机 DSH 里已经配好的（读 profile 文件来的）——做成一眼就知道能点的样子
           modelInfo && modelInfo.known && modelInfo.known.length
-            ? h('div', { style: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 } },
-              h('div', { style: S.tiny }, '你 DSH 里已经配好的 —— 点一下填到上面，再点「保存」：'),
+            ? h('div', { style: { ...S.card, marginTop: 10, background: 'rgba(76,141,255,.06)' } },
+              h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 2 } },
+                '你 DSH 里已经配好的 ← 点一下就选它'),
+              h('div', { style: { ...S.tiny, marginBottom: 8 } },
+                '下面每一个模型都是一颗按钮。点一下填进上面两格，再点「保存」才算定；点错了重选就行。'),
               modelInfo.known.map((k) => h('div', {
                 key: k.id,
-                style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' },
+                style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', margin: '6px 0' },
               },
-                h('span', { style: { ...S.tiny, minWidth: 130 }, title: k.from + ' ' + (k.baseURL || '') },
-                  k.id + (k.hasKey ? '' : '（没找到密钥）')),
-                (k.models && k.models.length ? k.models : ['（这家没写模型，手动填）']).map((m) => h('button', {
-                  key: m,
-                  title: (k.baseURL || '') + ' · ' + k.from,
-                  style: {
-                    ...S.tiny,
-                    padding: '2px 8px',
-                    borderRadius: 10,
-                    border: '1px solid #3a3f4b',
-                    background: 'transparent',
-                    color: 'inherit',
-                    cursor: 'pointer',
-                  },
-                  onClick: () => setModel({
-                    provider: k.id,
-                    model: m.startsWith('（这家没写模型') ? '' : m,
-                  }),
-                }, m)),
+                h('span', {
+                  style: { fontSize: 12, fontWeight: 600, minWidth: 120 },
+                  title: k.from + '  ' + (k.baseURL || ''),
+                },
+                  k.id,
+                  k.hasKey ? null : h('span', { style: { ...S.tiny, marginLeft: 4 } }, '（没找到密钥）'),
+                ),
+                (k.models && k.models.length ? k.models : ['（这家没写模型，手动填）']).map((m) => {
+                  const label = m.startsWith('（这家没写模型') ? m : m;
+                  const on = model.provider === k.id && model.model === label;
+                  return h('button', {
+                    key: m,
+                    type: 'button',
+                    title: [(k.baseURL || ''), k.from, on ? '（现在就选着这个）' : '点一下选它'].filter(Boolean).join(' · '),
+                    style: {
+                      padding: '5px 12px',
+                      borderRadius: 999,
+                      fontSize: 12,
+                      fontFamily: 'inherit',
+                      lineHeight: 1.3,
+                      cursor: 'pointer',
+                      transition: 'all .15s',
+                      border: '1px solid ' + (on
+                        ? 'var(--dsh-color-accent, #4c8dff)'
+                        : 'rgba(76,141,255,.65)'),
+                      background: on ? 'var(--dsh-color-accent, #4c8dff)' : 'rgba(76,141,255,.12)',
+                      color: on ? '#fff' : 'inherit',
+                      fontWeight: on ? 600 : 500,
+                      boxShadow: on ? '0 0 0 2px rgba(76,141,255,.25)' : 'none',
+                    },
+                    onMouseEnter: (e) => { if (!on) e.currentTarget.style.background = 'rgba(76,141,255,.28)'; },
+                    onMouseLeave: (e) => { if (!on) e.currentTarget.style.background = 'rgba(76,141,255,.12)'; },
+                    onClick: () => setModel({
+                      provider: k.id,
+                      model: m.startsWith('（这家没写模型') ? '' : m,
+                    }),
+                  }, on ? '✓ ' + label : label);
+                }),
               )),
+              h('div', { style: { ...S.tiny, marginTop: 6 } },
+                model.provider && model.model
+                  ? '现在选着：' + model.provider + ' / ' + model.model + '（点了「保存」才真的切过去）'
+                  : '还没选。留空 = 跟 profile 默认。'),
             )
             : null,
           modelMsg ? h('div', { style: S.tiny }, modelMsg) : null,
