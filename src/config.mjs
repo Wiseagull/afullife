@@ -95,6 +95,16 @@ const DEFAULTS = {
   sticker: {
     style: 'normal',
   },
+  // QQ 空间（说说）。默认关着：外发的东西不该在她自己手上没有闸地跑。
+  // 打开之后她能读自己的说说、能发、能删自己刚发的那条。
+  qzone: {
+    enabled: false,
+    maxChars: 1000,
+    // 配图这条路还没通：Qzone 的图床必须传进一个已存在的相册，而这个号一个相册都没有
+    // （albumsInUser: 0）。要么建一个相册（会在她空间里多一个别人看得见的相册），
+    // 要么只发文字。2026-10-23 定的：只发文字。
+    allowImages: false,
+  },
   // 表情库上限：哪一个先到就按哪个清，用得最少的先走
   stickers: {
     maxCount: 300,

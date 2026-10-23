@@ -18,6 +18,7 @@ import { readProfileModel } from '../brain/model.mjs';
 import { createBrain } from '../brain/index.mjs';
 import { dshDefaults } from '../brain/headless.mjs';
 import { readCredentialRef, readDshProviders } from '../brain/model.mjs';
+import { fetchCookies, listFeeds, publish as qzonePublish, removeFeed } from '../qzone/client.mjs';
 
 const ORIGIN_OK = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 
@@ -38,6 +39,8 @@ const EDITABLE = [
   'brain.headless.model',
   'brain.headless.decideModel',
   'brain.headless.visionModel',
+  'qzone.enabled',
+  'qzone.maxChars',
   'brain.headless.providers',
   'brain.headless.handover',
   'ack',
@@ -128,7 +131,7 @@ async function readBody(req) {
  * @param {object} deps.brain
  * @param {(ev: object) => void} [deps.onConfig]
  */
-export function startWeb({ usageStore, cfg, logger, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onConfig }) {
+export function startWeb({ usageStore, cfg, logger, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onebot, onConfig }) {
   // 本机接口的令牌：所有 /api/* 都要带，见 src/web/token.mjs 顶上那段说明
   const TOKEN = ensureToken(path.join(ROOT, 'data'));
   const conf = cfg.web || {};
@@ -642,6 +645,47 @@ const pair = (m) => (m && String(m.provider || '').trim() && String(m.model || '
       // ── 表情库：只留一个写者（桥自己）──
       // scripts/sticker-lib.mjs 也走这里；桥没开时它才退回直接写文件——那时它是唯一写者，安全。
       // 不这么做的话两边各拿一份内存、整份写回，谁最后写谁赢（2026-10-21 实测发现的丢条目）。
+      // ── QQ 空间（说说）──
+      if (area === 'qzone') {
+        const qc = cfg.qzone || {};
+        if (qc.enabled !== true) {
+          return json(res, 400, { error: 'QQ 空间这条还没开（config 里 qzone.enabled）' }, origin);
+        }
+        if (!onebot) return json(res, 503, { error: '桥这边没连 OneBot，拿不到 cookie' }, origin);
+        const withCookies = () => fetchCookies(onebot, (tag, msg) => logger?.info?.(tag, msg));
+        if (req.method === 'GET') {
+          const c = await withCookies();
+          const feeds = await listFeeds({ ...c, num: Number(url.searchParams.get('num')) || 10 });
+          return json(res, 200, { ok: true, uin: c.uin, feeds }, origin);
+        }
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          const op = String(body?.op || 'post');
+          const c = await withCookies();
+          if (op === 'post') {
+            const text = String(body?.text || '').trim();
+            const images = Array.isArray(body?.images)
+              ? body.images.map((s) => String(s || '').trim()).filter(Boolean).slice(0, 9)
+              : [];
+            if (images.length && qc.allowImages !== true) {
+              return json(res, 400, {
+                error: '配图这条路还没通：图床要求传进一个已存在的相册，这个号没有相册。先只发文字。',
+              }, origin);
+            }
+            // 闸再拦一道：外发的东西都从这儿出去，命令行也是打这个接口
+            const v = gate?.check ? await gate.check('qzone_publish', { text, images }, { roomKey: 'qzone', trusted: true }) : { level: 'allow' };
+            if (v && v.level === 'block') return json(res, 403, { error: v.why || '被闸拦了' }, origin);
+            const r = await qzonePublish({ ...c, text, images, logger: (tag, msg) => logger?.info?.(tag, msg) });
+            return json(res, 200, { ok: true, ...r }, origin);
+          }
+          if (op === 'delete') {
+            const r = await removeFeed({ ...c, tid: String(body?.tid || '').trim() });
+            return json(res, 200, { ok: true, ...r }, origin);
+          }
+          return json(res, 400, { error: `不认识的 op：${op}` }, origin);
+        }
+      }
+
       if (area === 'stickers') {
         if (!stickerLib) return json(res, 503, { error: '桥这边没接表情库' }, origin);
 

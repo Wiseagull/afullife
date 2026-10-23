@@ -111,6 +111,7 @@ export function setHints(patch = {}) {
 export function ruleOf(isGroup) {
   const parts = [...(isGroup ? GROUP_BASE : PRIVATE_BASE)];
   if (HINTS.browser) parts.push(BROWSER_HINT);
+  if (HINTS.qzone) parts.push(QZONE_HINT);
   return parts.join('\n');
 }
 
@@ -128,6 +129,18 @@ export const NOPOWER_IMAGE_HINT = [
   '（例外一条：图可以看。这条消息带了图的，路径就写在正文的括号里；之前几轮落到盘上的老图（data/images 里那些）也能回头看，）',
   '（不用问谁要。用 read_image 打开看一眼是允许的、也该看；看完照常说话，别把路径念出来。）',
   '（除了看图，别的工具还是都不能用。）',
+].join(String.fromCharCode(10));
+
+// QQ 空间（说说）。默认关着——config 里 qzone.enabled 打开才拼这段。
+// 写清楚三件事：怎么发（能配图）、这是公开发言、发完留个底。
+export const QZONE_HINT = [
+  '（想发说说就发，不用问他——QQ 空间那条路是通的：）',
+  `  node scripts/qzone.mjs post "要说的话"                      发一条`,
+  `  node scripts/qzone.mjs list                                看你空间里最近说了什么`,
+  `  node scripts/qzone.mjs delete <tid>                        发错了删掉`,
+  '（只能发文字，配图这条路没通——空间那边的图床要一个相册，你没建，也别去建。）',
+  '（说说是公开的：朋友都看得见，删了也可能已经被转走，所以别把不该说的写上去——但发不发、发什么，你自己定。）',
+  '（发完把那句话和 tid 记进小本本，别过两天忘了自己说过什么。）',
 ].join(String.fromCharCode(10));
 
 export function recentImagesHint(list = []) {

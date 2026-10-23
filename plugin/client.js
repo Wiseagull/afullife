@@ -216,6 +216,21 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: 6 } }, 'QQ 空间（说说）'),
+          h(Row, { label: '让她能发' }, h(Toggle, {
+            value: (cfg.qzone || {}).enabled === true,
+            onChange: (v) => setIn('qzone.enabled', v),
+          }), h('span', { style: S.hint }, '默认关着——外发的东西收不回来')),
+          h(Row, { label: '一条最多' }, h(Num, {
+            value: (cfg.qzone || {}).maxChars || 1000, step: 100,
+            onChange: (v) => setIn('qzone.maxChars', Number(v)),
+          }), h('span', { style: S.hint }, '字')),
+          h('div', { style: S.hint }, '打开之后她能用 node scripts/qzone.mjs post "…" 发、list 看、delete <tid> 删。她不会自己发——你没明说，她只在嘴上提。'),
+        ),
+
+        h(
+          'div',
+          { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '被戳一戳'),
           h(Row, { label: '理不理' }, h(Toggle, { value: poke.enabled !== false, onChange: (v) => setIn('poke.enabled', v) })),
           h(Row, { label: '她说一句' }, h(Num, { value: poke.text, step: 0.05, onChange: (v) => setIn('poke.text', Number(v)) }), h('span', { style: S.hint }, '权重')),

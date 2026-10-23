@@ -412,7 +412,7 @@ function hasBrowserSkill() {
   return fs.existsSync(probe);
 }
 const browserReady = hasBrowserSkill();
-setHints({ browser: browserReady });
+setHints({ browser: browserReady, qzone: (cfg.qzone || {}).enabled === true });
 
 L('boot', `root=${ROOT}`);
 L('boot', `onebot ws=${cfg.onebot.wsUrl} http=${cfg.onebot.httpUrl} token=${cfg.onebot.accessToken ? 'yes' : 'no'}`);
@@ -1482,7 +1482,7 @@ pruneStickers();
 
 // ── 面板接口 ─────────────────────────────────────────
 startWeb({
-  usageStore, cfg, logger: { info: L, warn: (tag, msg) => L(tag, msg) }, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib });
+  usageStore, cfg, logger: { info: L, warn: (tag, msg) => L(tag, msg) }, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onebot: client });
 
 // ── 起 ───────────────────────────────────────────────────
 client.connect();
