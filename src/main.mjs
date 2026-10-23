@@ -736,10 +736,13 @@ async function handleBatch(roomKey, msgs) {
     contextPerStep.delete(roomKey);
     L('brain', `会话上下文 ${perStep} token 够大了（阈值 ${rotateAt}），这个房间换新会话`);
     // 那段"过程"（调过什么工具、读了哪些文件、为什么这么定）只存在旧会话里，events 里没有。
-    // 排队让它自己写一张交接纸条，落进记忆——新会话下一轮就读得到。
+    // 丢到后台道让它自己写一张交接纸条，落进记忆——新会话下一轮就读得到。
     const hcfg = cfg.brain?.headless?.handover || {};
+    // 交接纸条不开口，所以不占说话锁：它是一次完整的 brain.run，
+    // 排在这条队里的话，这段活跃期里他下一句就得等它写完（2026-10-23 查到的第二处）。
+    // 旧会话已经 clear 了，跑它不会跟新会话抢同一条 session。
     if (hcfg.enabled !== false) {
-      queue.push(() => makeHandover({
+      bgQueue.push(() => makeHandover({
         brain,
         sessionId: oldSid,
         roomKey,
@@ -1212,10 +1215,13 @@ const groupRooms = () =>
   )];
 
 /** 冷场试探 / 主动开话题：都是"让它自己说一句"，说不说由它（PASS 就闭嘴）。 */
+// 同一个房间同一时刻只放一个"在想"，别叠着跑。
+const idleThinking = new Set();
 async function idleSay(roomKey, mode = 'idle') {
   if (brain.kind === 'none') return;
   const gid = roomKey.split(':')[1];
   if (!gid) return;
+  if (idleThinking.has(roomKey)) return;
 
   const ask = mode === 'idle'
     ? '【屋里安静了一会儿】你想接一句吗？想就自然地说一句短的（别问"还有人吗"这种）；不想就只回 PASS。'
@@ -1228,9 +1234,16 @@ async function idleSay(roomKey, mode = 'idle') {
   // 没人在场（冷场/自己开话题）：她可以说话，但一个工具都不许用。
   const onEvent = makeDenyAllOnEvent(roomKey);
 
+  // 想这一下不占说话锁：冷场想一句能跑十几秒，占着锁的话他这时候发消息
+  // 就得在后面等。这个形状 10-22 在自由活动那条路上踩过（12:30:42 他那句
+  // 等到 12:31:48，那一拍 brain.run 跑了 92 秒），那条路 16:03 起只把
+  // "发出去"排进锁；冷场这处是同一个形状的最后一处。
+  // 想好了才排队去说 —— 说那一下必须独占，一个我一次只说一句。
+  idleThinking.add(roomKey);
+  const t0 = Date.now();
+  let result;
   try {
-    const result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent });
-    await finishTurn(roomKey, { kind: 'group', id: gid, text: '', msgId: null }, result, [], []);
+    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent });
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       L('gate', `冷场开口时被拦：${gate.blocked.verdict.why}`);
@@ -1238,18 +1251,32 @@ async function idleSay(roomKey, mode = 'idle') {
       return;
     }
     L('social', `没说出来：${err?.message ?? err}`);
+    return;
+  } finally {
+    idleThinking.delete(roomKey);
   }
+  // 想好了，轮到说：这期间他要是开口了，冷场就不成立，这句咽回去。
+  if (queue.busy || lastActivityAt >= t0) {
+    L('social', `${roomKey} 冷场想好了，但这期间有人说话，咽回去`);
+    return;
+  }
+  await queue.push(
+    () => finishTurn(roomKey, { kind: 'group', id: gid, text: '', msgId: null }, result, [], []),
+    `${roomKey}::idle-say`,
+  );
 }
 
 if (cfg.group?.enabled !== false && social.enabled !== false && brain.kind !== 'none') {
   const idleEvery = Math.max(15000, Number(social.idleWindowMs ?? 360000) / 6);
   setInterval(() => {
     for (const room of groupRooms()) {
+      // 正在回他话的时候不查冷场：idleCheck 一被叫到就把这次试探机会用掉了
+      if (queue.busy) continue;
       const what = router.idleCheck(room);
       if (what === 'retire') L('social', `${room} 退场，回观望`);
       else if (what === 'idle-probe') {
         L('social', `${room} 冷场，试探一句`);
-        queue.push(() => idleSay(room, 'idle'), `${room}::idle`);
+        idleSay(room, 'idle').catch((e) => L('social', `冷场异常：${e?.message ?? e}`));
       }
     }
   }, idleEvery).unref?.();
@@ -1268,9 +1295,10 @@ if (cfg.group?.enabled !== false && social.enabled !== false && brain.kind !== '
         if (!nextAt.has(room)) { schedule(room); continue; }
         if (now < nextAt.get(room)) continue;
         schedule(room);
+        if (queue.busy) continue; // 他在说话，这时候不自己开话题
         if (!router.proactiveCheck(room)) continue;
         L('social', `${room} 安静很久，主动开个话题`);
-        queue.push(() => idleSay(room, 'proactive'), `${room}::proactive`);
+        idleSay(room, 'proactive').catch((e) => L('social', `开话题异常：${e?.message ?? e}`));
       }
     }, 60000).unref?.();
   }

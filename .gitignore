@@ -7,6 +7,11 @@ config.local.json
 *.pid
 .DS_Store
 
+# 手改文件前留的备份（*.bak、*.bak-before-xxx、*.bak-20261022-0542 都算）
+# 里面常常带着本机路径和号，自己留着看可以，别提交。
+*.bak
+*.bak-*
+
 # 用户把 SnowLuma 放这儿时，别把第三方的几十 MB 一起提交
 /vendor/
 
@@ -26,6 +31,9 @@ notebook/tmp/*
 # 产物：她画的图、别人发的表情原图
 /SD-Picture/
 /stickers/
+
+# dsh-image-gen 插件把出图直接写在工作区根上，一个目录一张、两三 MB
+/dsh-image-gen/
 
 # SD 画图插件自己写进工作区的脚本，不是本项目的东西
 sd-direct.ps1
