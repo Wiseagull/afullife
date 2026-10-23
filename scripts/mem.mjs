@@ -126,7 +126,7 @@ function cmdNow() {
   const lastByRoom = new Map();
   for (const e of rows) lastByRoom.set(e.room || '-', e);
   console.log('今天各房间最后一条（原文）：');
-  for (const [room, e] of lastByRoom) { console.log(''); console.log(show(e)); }
+  for (const [, e] of lastByRoom) { console.log(''); console.log(show(e)); }
 }
 
 switch (cmd) {
