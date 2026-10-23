@@ -183,8 +183,12 @@ function usageBlock(usageLine) {
 export function videoHint() {
   return [
     '（视频1：…）那种就是真存下来的视频文件。你不能直接看，要看就自己抽帧：',
-    'ffmpeg -i <文件> -vf "fps=1" -frames:v 12 <临时目录>/f_%02d.jpg，抽完用 read_image 一张张看；',
-    '只听声音可以用 whisper 那套转写。抽完的帧记得清掉，别攒在盘里。',
+    '1) 先问多长：ffprobe -v error -show_entries format=duration -of csv=p=0 <文件>；',
+    '2) 按长度定帧数，**最多 8 张**：短于 10 秒抽 3 张，10–60 秒抽 5 张，再长抽 8 张；',
+    '3) 抽：ffmpeg -i <文件> -vf "fps=<帧数/时长>" -frames:v <帧数> <临时目录>/f_%02d.jpg，',
+    '   然后 read_image 一张张看。别一上来就 fps=1 -frames:v 12——一分钟以上的视频那样',
+    '   既慢又糊，2026-10-23 有一次这么抽，一轮跑了五分钟还没说完；',
+    '4) 只听声音可以用 whisper 那套转写。抽完的帧记得清掉，别攒在盘里。',
     '别人发的动图（GIF）会顺手转成一份 -anim.mp4 一起给你：read_image 读 GIF 只给一帧，',
     '想知道它在动什么，就抽那份视频的帧；只是想认表情包，看那一帧就够。',
   ].join('');
