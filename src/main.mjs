@@ -3,7 +3,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 
-import { loadConfig, ensureDirs, ROOT, interestFile, personaFile, notebookDir, workerDir } from './config.mjs';
+import { loadConfig, ensureDirs, ROOT, interestFile, doingFile, personaFile, notebookDir, workerDir } from './config.mjs';
 import { log } from './util/log.mjs';
 import { OneBotClient } from './onebot/client.mjs';
 import { ensureSnowLuma } from './snowluma/launch.mjs';
@@ -34,6 +34,8 @@ import { toPlain , oneLine } from './util/text.mjs';
 import { createRouter } from './body/router.mjs';
 import { Debounce } from './body/debounce.mjs';
 import { FreeTime } from './body/freetime.mjs';
+import { Doing } from './body/doing.mjs';
+import { restLine, restState, justWoke } from './body/rest.mjs';
 import { startAutoFree } from './body/freetime-auto.mjs';
 import { SerialQueue } from './body/queue.mjs';
 import { createBrain } from './brain/index.mjs';
@@ -119,6 +121,9 @@ const FG = 10;
 const pokeCooldown = new PokeCooldown(cfg.poke?.cooldownMs ?? 30000);
 const brain = createBrain(cfg, L);
 const sessions = new SessionMap({ file: path.join(cfg.dataDir, 'sessions.json') });
+// 每个房间上一轮用的是哪个档位（轻装 / 全量）：同一会话里换档，工具定义那段前缀就变了，
+// 上一轮的 prompt cache 接不上。只记下来，好从日志里看出换得有多勤（不改行为）。
+const lastProfile = new Map();
 const roomNames = new RoomNames({ file: path.join(cfg.dataDir, 'rooms.json') });
 const notes = new NotesStore({ file: path.join(cfg.dataDir, 'memory', 'notes.jsonl') });
 const cursorFile = path.join(cfg.dataDir, 'memory', 'cursor.json');
@@ -161,8 +166,9 @@ const interests = new InterestStore({ file: interestFile(cfg) });
 const usageStore = new UsageStore({ dir: cfg.usage?.dir || 'data/usage' });
 // 每个房间“上一步上下文有多大”。超阈值就换新会话，免得每步都重看几万字历史。
 const contextPerStep = new Map();
-const usagePrice = cfg.usage?.price || null;
-const usageCurrency = cfg.usage?.currency || '¥';
+// 面板里能改 usage.price / usage.currency：每次用现读，别在启动时钉死
+const usagePrice = () => cfg.usage?.price || null;
+const usageCurrency = () => cfg.usage?.currency || '¥';
 try {
   const selfText = fs.readFileSync(personaFile(cfg, 'self'), 'utf8');
   const synced = interests.sync(selfText);
@@ -172,8 +178,60 @@ try {
   L('interests', `同步失败（不影响说话）：${e?.message ?? e}`);
 }
 
+// 她此刻在做什么：全局一份，不分房间（一副身体）。
+// 只认她自己写的 <busy:洗澡:20/>——不从语气里猜，见 src/body/doing.mjs 开头。
+const doing = new Doing({ file: doingFile(cfg), cfg: cfg.doing || {}, logger: (tag, msg) => L(tag, msg) });
+const stateLine = () => {
+  const parts = [];
+  try {
+    if (cfg.doing?.enabled !== false) {
+      const l = doing.line();
+      if (l) parts.push(l);
+    }
+  } catch (e) { L('doing', `读状态出错（这一轮当没在忙）：${e?.message ?? e}`); }
+  try {
+    const r = restLine(cfg.rest || {});
+    if (r) parts.push(r);
+  } catch { /* 困不困算错不影响说话 */ }
+  // 刚出睡区间那四十分钟：人醒了但脑子还没转起来，句子自然短。
+  try {
+    if (justWoke(cfg.rest || {})) {
+      parts.push('你刚醒没多久，脑子还没完全转起来——句子短一点，别一上来就精神抖擞。');
+    }
+  } catch { /* 同上 */ }
+  return parts.join('\n');
+};
+
+/**
+ * 这一批要不要慢半拍。
+ * 她手头真有事、或者夜里困着，就等一小会儿再开口——只延这一条，
+ * 绝不拦消息，也绝不改「回不回」的判定。上限一分钟，防配置写错把人卡死。
+ */
+const stateDelay = () => {
+  let ms = 0;
+  try {
+    if (cfg.doing?.enabled !== false) {
+      const st = doing.read();
+      if (st && !st.justDone) ms = Math.max(ms, Number(cfg.doing?.busyExtraDelayMs ?? 4000));
+    }
+  } catch { /* 读不到状态就当没在忙 */ }
+  try {
+    if (restState(cfg.rest || {})) ms = Math.max(ms, Number(cfg.rest?.extraDelayMs ?? 8000));
+  } catch { /* 困不困算错不影响说话 */ }
+  return Number.isFinite(ms) && ms > 0 ? Math.min(ms, 60000) : 0;
+};
+
 const freeTime = new FreeTime({
   onUsage: recordUsage,
+  // 她在自己那段时间里说「要去洗澡」就记下来；忙完了就收尾。
+  // 这是唯一一条写状态的入口——别的地方都不许改它。
+  onBusy: (task, minutes) => {
+    if (cfg.doing?.enabled === false) return;
+    try {
+      if (task) doing.set(task, minutes);
+      else doing.clear();
+    } catch (e) { L('doing', `记她的状态失败（不影响说话）：${e?.message ?? e}`); }
+  },
   cfg,
   brain,
   send: freeSay,
@@ -270,13 +328,18 @@ const worker = cfg.brain?.kind === 'headless'
 // 不能把启动那一刻的值钉死在里面（2026-10-23 踩过：面板里换了看图模型，桥不重启就不认）。
 function withModel(base, pickModel) {
   if (!base) return base;
-  return {
-    run: (opts = {}) => {
-      const m = pickModel();
-      const ok = m && String(m.provider || '').trim() && String(m.model || '').trim();
-      return ok ? base.run({ ...opts, model: m }) : base.run(opts);
-    },
+  // 壳只该管「这一轮用哪个模型」，别的都该原样透过去。
+  // 以前是手写白名单（只转发 kind + run）：2026-10-24 交接纸条因为 kind 丢了，
+  // 09:37 之后每次换会话都空转、一张都没写成；补上 kind 之后 reconfigure 还在
+  // 名单外，等于同一种雷还埋着——只是这次没爆而已。
+  // 改成挂在原型链上：以后 base 长什么新东西，都不用回来补这一行。
+  const shell = Object.create(base);
+  shell.run = (opts = {}) => {
+    const m = pickModel();
+    const ok = m && String(m.provider || '').trim() && String(m.model || '').trim();
+    return ok ? base.run({ ...opts, model: m }) : base.run(opts);
   };
+  return shell;
 }
 const slotModel = (name) => () => cfg.brain?.headless?.[name] || null;
 const decideBrain = withModel(worker, slotModel('decideModel'));
@@ -290,11 +353,11 @@ const lastRoundTouched = new Map();
 // 拼给提示词的那一句「今天花了多少」：全局 + 这个房间
 function usageLineFor(roomKey) {
   try {
-    const t = usageStore.today(undefined, { price: usagePrice });
+    const t = usageStore.today(undefined, { price: usagePrice() });
     if (!t.turns) return '';
-    const all = describeUsage(t, { price: usagePrice, currency: usageCurrency });
+    const all = describeUsage(t, { price: usagePrice(), currency: usageCurrency() });
     const mine = t.rooms.find((r) => r.room === roomKey);
-    const mineText = mine ? `；这个房间 ${describeUsage(mine, { price: usagePrice, currency: usageCurrency })}` : '';
+    const mineText = mine ? `；这个房间 ${describeUsage(mine, { price: usagePrice(), currency: usageCurrency() })}` : '';
     return all + mineText;
   } catch {
     return '';
@@ -955,7 +1018,8 @@ async function handleBatch(roomKey, msgs) {
   const turnProfile = verdict.full || !chatProfile ? null : chatProfile;
   if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey) });
+  const stateText = stateLine();
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey), state: stateText });
   let prompt = sid
     ? buildFollowup(msgs, {
       delta, isGroup: asGroup, addressed, selfNames: names, stickerLine,
@@ -963,8 +1027,19 @@ async function handleBatch(roomKey, msgs) {
       rules: verdict.full ? rulesText : '',
       usageLine: usageLineFor(roomKey),
       voice: voiceNoteFor(roomKey),
+      state: stateText,
     })
     : promptFresh;
+
+  // 缓存记账：同一会话里档位一换，工具定义那段前缀就变了，上一轮的 prompt cache 接不上。
+  // 这里只记日志、不改行为——先看清换挡有多勤，再决定值不值得把档位固定住。
+  {
+    const prevProf = lastProfile.get(roomKey);
+    if (prevProf !== undefined && prevProf !== turnProfile) {
+      L('brain', `会话 ${roomKey} 换挡：${prevProf || '全量'} → ${turnProfile || '全量'}，这一轮前缀变了（缓存接不上）`);
+    }
+    lastProfile.set(roomKey, turnProfile);
+  }
 
   // 这一批里别人发的图：就算不许动手，也得让她看一眼，不然群里她永远"打不开"。
   // 要放在拼提示词之前——"这一轮带图、看图是允许的"这句话得先落到她眼前，
@@ -1058,7 +1133,16 @@ async function handleBatch(roomKey, msgs) {
     return onEvent(ev);
   };
   try {
-    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, profile: turnProfile, model: turnModel });
+    // 她手头有事（或凌晨困着）：这一批先慢半拍再开口。
+  // 只延这一条，绝不拦消息、也绝不改「回不回」的判定——让他干等不是拟人，是没礼貌。
+  {
+    const delayMs = stateDelay();
+    if (delayMs > 0) {
+      L('doing', `她在忙 / 困着：这一条先等 ${Math.round(delayMs / 1000)} 秒`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, profile: turnProfile, model: turnModel });
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       const b = gate.blocked;
@@ -1319,7 +1403,9 @@ async function runDistill() {
 }
 
 if (worker) {
-  const everyMs = Number(process.env.QAD_DISTILL_MS || cfg.distillMs || 30 * 60 * 1000);  L('memory', `已记 ${notes.all().length} 条，待确认 ${pending.all().filter((p) => p.status !== 'closed').length} 条，整理间隔 ${Math.round(everyMs / 60000)} 分钟`);
+  const everyMs = Number(process.env.QAD_DISTILL_MS || cfg.distillMs || 30 * 60 * 1000);
+  const upkeepMs = Number(process.env.QAD_UPKEEP_MS || cfg.upkeepMs || 6 * 3600 * 1000);
+  L('memory', `已记 ${notes.all().length} 条，待确认 ${pending.all().filter((p) => p.status !== 'closed').length} 条，整理间隔 ${Math.round(everyMs / 60000)} 分钟`);
   // 后台活跟"回话"共用一条队列（必须如此，一个我一次只能说一句），
   // 所以有人刚说完话的时候不许它们占着——体检一次能跑五分钟，
   // 那五分钟里她一个字都说不出来，看起来就是"不回消息"。
@@ -1342,16 +1428,55 @@ if (worker) {
       return fn();
     }, label);
   };
+
+  // ── 记账 + 防重入 ─────────────────────────────────────
+  // 这两个活都挂「闲了才跑」：他一直在说话的时候就一路让路。让路本身没错，
+  // 可要是让到整晚没跑成，进程活着、队列也活着，唯独记忆整理和体检再也不动，
+  // 而且一声不响。所以给每个活记一笔「最后一次真跑完」的时刻，看门狗靠它判。
+  const lastRan = { distill: Date.now(), upkeep: Date.now() };
+  const inflight = new Set();   // 正在跑
+  const queued = new Set();     // 已经排进队、还没轮到
+  const tracked = (label, fn) => async () => {
+    if (inflight.has(label)) { L('queue', `${label} 上一趟还没跑完，这次不叠`); return null; }
+    inflight.add(label);
+    try { return await fn(); }
+    finally { inflight.delete(label); lastRan[label] = Date.now(); }
+  };
+  const distillJob = tracked('distill', runDistill);
+  const upkeepJob = tracked('upkeep', runUpkeep);
   // 开机也走"闲了才跑"：以前是定时直接 push，重启一次就把她的回话堵在后面好几分钟
-  setTimeout(pushWhenIdle(runDistill, 'distill'), 15000).unref?.();
-  setInterval(pushWhenIdle(runDistill, 'distill'), everyMs).unref?.();
+  setTimeout(pushWhenIdle(distillJob, 'distill'), 15000).unref?.();
+  setInterval(pushWhenIdle(distillJob, 'distill'), everyMs).unref?.();
 
   // 体检：跟新流水无关，看的是“已经记着的有没有记坏”
-  const upkeepMs = Number(process.env.QAD_UPKEEP_MS || cfg.upkeepMs || 6 * 3600 * 1000);
   L('memory', `记忆体检间隔 ${Math.round(upkeepMs / 60000)} 分钟`);
   // 体检最重（记忆 + 看图筛表情 + 补标签），要闲得更久才准它上
-  setTimeout(pushWhenIdle(runUpkeep, 'upkeep', { quiet: 300000 }), 90000).unref?.();
-  setInterval(pushWhenIdle(runUpkeep, 'upkeep', { quiet: 300000 }), upkeepMs).unref?.();
+  setTimeout(pushWhenIdle(upkeepJob, 'upkeep', { quiet: 300000 }), 90000).unref?.();
+  setInterval(pushWhenIdle(upkeepJob, 'upkeep', { quiet: 300000 }), upkeepMs).unref?.();
+
+  // ── 看门狗：后台活饿死的兜底 ───────────────────────────
+  // 上面那条路在他一直说话时会无限让路；这条不吃 quiet，每 5 分钟抬头看一眼：
+  // 哪个超过两个周期没跑成，记一条日志、直接补一次。只补、不改正常节拍；
+  // 补的那次照样走 bgQueue，不占说话锁。想关：QAD_WATCHDOG=0；
+  // 想放宽阈值：QAD_WATCHDOG_GRACE=<几个周期>。
+  const watchdogGrace = Number(process.env.QAD_WATCHDOG_GRACE || 2);
+  if (process.env.QAD_WATCHDOG !== '0' && watchdogGrace > 0) {
+    const watched = [['distill', distillJob, everyMs], ['upkeep', upkeepJob, upkeepMs]];
+    const watchMs = Number(process.env.QAD_WATCHDOG_MS || Math.min(5 * 60 * 1000, Math.max(60 * 1000, Math.round(everyMs / 4))));
+    setInterval(() => {
+      const now = Date.now();
+      for (const [label, job, period] of watched) {
+        const gap = now - lastRan[label];
+        if (gap < period * watchdogGrace) continue;
+        if (inflight.has(label) || queued.has(label)) continue;
+        L('queue', `${label} 已经 ${Math.round(gap / 60000)} 分钟没跑成（周期 ${Math.round(period / 60000)} 分钟），不等安静了，直接补一次`);
+        queued.add(label);
+        bgQueue.push(async () => {
+          try { await job(); } finally { queued.delete(label); }
+        }, `${label}·补`);
+      }
+    }, watchMs).unref?.();
+  }
 }
 
 // ── 收图清理：按天数 + 容量，删最旧的 ─────────────────────
@@ -1480,9 +1605,39 @@ const stickerLib = new StickerLibrary({
 });
 pruneStickers();
 
-// ── 面板接口 ─────────────────────────────────────────
+// ── 面板接口：改完配置立刻生效，不用重启 ──────────────────
+// 为什么要有这个：sender 把 send.* 拷到自己身上了、戳一戳冷却把毫秒拷进去了，
+// 面板改完只动了 cfg 里那份，它们手里还是旧的。改动分三类：
+//   · 值拷贝的（发送参数、冷却毫秒）→ 在这里重新灌一遍
+//   · 派生出来的提示词（空间能不能用）→ setHints 重算一次
+//   · 决定定时器结构的（group.social）→ 热改不了，标进 NEEDS_RESTART
+function onConfigChanged({ touched = [] } = {}) {
+  const set = new Set(touched);
+  try {
+    if (touched.some((p) => p.startsWith('send.'))) {
+      sender.reconfigure(cfg.send || {});
+      L('web', '发送参数换了：分句 / 条间间隔 / 单条上限');
+    }
+    if (set.has('poke')) {
+      pokeCooldown.setMs(cfg.poke?.cooldownMs ?? 30000);
+      L('web', '戳一戳冷却换了');
+    }
+    if (touched.some((p) => p.startsWith('brain.headless.'))) {
+      brain.reconfigure?.({ ...(cfg.brain?.headless || {}) });
+      L('web', '模型参数换了：下一次回话就用新的');
+    }
+    if (set.has('qzone.enabled')) {
+      setHints({ qzone: (cfg.qzone || {}).enabled === true });
+      L('web', `QQ 空间那条${cfg.qzone?.enabled === true ? '开了' : '关了'}`);
+    }
+    L('web', `配置已热更新：${touched.join('、')}`);
+  } catch (err) {
+    L('web', `热更新出错（这次只能靠重启）：${err?.message ?? err}`);
+  }
+}
+
 startWeb({
-  usageStore, cfg, logger: { info: L, warn: (tag, msg) => L(tag, msg) }, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onebot: client });
+  usageStore, cfg, logger: { info: L, warn: (tag, msg) => L(tag, msg) }, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onebot: client, onConfig: onConfigChanged });
 
 // ── 起 ───────────────────────────────────────────────────
 client.connect();

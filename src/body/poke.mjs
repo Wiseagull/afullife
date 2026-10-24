@@ -53,6 +53,10 @@ export class PokeCooldown {
   constructor(ms = 30000) {
     this.#ms = Number(ms) > 0 ? Number(ms) : 0;
   }
+  /** 面板里改了 poke.cooldownMs 之后原地换掉，不用重启桥。 */
+  setMs(ms) {
+    this.#ms = Number(ms) > 0 ? Number(ms) : 0;
+  }
   /** 冷却中返回 true */
   hot(room, now = Date.now()) {
     if (!this.#ms) return false;

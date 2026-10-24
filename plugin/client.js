@@ -246,6 +246,54 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '她手头的事'),
+          h(Row, { label: '记不记' }, h(Toggle, {
+            value: (cfg.doing || {}).enabled !== false,
+            onChange: (v) => setIn('doing.enabled', v),
+          }), h('span', { style: S.hint }, '她自己说「要去洗澡」才记，不从语气里猜')),
+          h(Row, { label: '没说多久' }, h(Num, {
+            value: (cfg.doing || {}).defaultMinutes || 20, step: 5,
+            onChange: (v) => setIn('doing.defaultMinutes', Number(v)),
+          }), h('span', { style: S.hint }, '分钟')),
+          h(Row, { label: '忙完还记着' }, h(Num, {
+            value: (cfg.doing || {}).afterMinutes ?? 30, step: 5,
+            onChange: (v) => setIn('doing.afterMinutes', Number(v)),
+          }), h('span', { style: S.hint }, '分钟——「刚忙完」这个尾巴最好接话')),
+          h(Row, { label: '在忙时晚说' }, h(Num, {
+            value: Math.round(((cfg.doing || {}).busyExtraDelayMs ?? 4000) / 1000), step: 1,
+            onChange: (v) => setIn('doing.busyExtraDelayMs', Number(v) * 1000),
+          }), h('span', { style: S.hint }, '秒（只延第一条，绝不拦消息）')),
+          h('div', { style: S.hint }, '她在自己那段时间里写 <busy:洗澡:20/> 才算数，<busy:done/> 是忙完。这是全局一份——群里说去洗澡，私聊里也是刚洗完。'),
+        ),
+
+        h(
+          'div',
+          { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '她也会困'),
+          h(Row, { label: '夜里犯困' }, h(Toggle, {
+            value: (cfg.rest || {}).enabled !== false,
+            onChange: (v) => setIn('rest.enabled', v),
+          }), h('span', { style: S.hint }, '不是关机——夜里回得慢半拍、句子短一点')),
+          h(Row, { label: '几点到几点' },
+            h(Num, {
+              value: (cfg.rest || {}).from ?? 1, step: 1,
+              onChange: (v) => setIn('rest.from', Number(v)),
+            }),
+            h('span', { style: S.hint }, '点到'),
+            h(Num, {
+              value: (cfg.rest || {}).to ?? 7, step: 1,
+              onChange: (v) => setIn('rest.to', Number(v)),
+            }),
+            h('span', { style: S.hint }, '点（从 > 到 = 跨零点）')),
+          h(Row, { label: '夜里晚说' }, h(Num, {
+            value: Math.round(((cfg.rest || {}).extraDelayMs ?? 8000) / 1000), step: 1,
+            onChange: (v) => setIn('rest.extraDelayMs', Number(v) * 1000),
+          }), h('span', { style: S.hint }, '秒')),
+        ),
+
+        h(
+          'div',
+          { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '什么时候开口（状态机）'),
           h(Row, { label: '自动接话' }, h(Toggle, { value: social.enabled, onChange: (v) => setIn('group.social.enabled', v) })),
           h(Row, { label: '观望期接话概率' }, h(Num, {
@@ -1279,9 +1327,14 @@ window.__ModuleLoader__.load({
             h('span', { style: S.hint }, '秒')),
           h(Row, { label: '最多说几句' },
             h(Num, { value: Number(f.maxMessages) || 3, step: 1, onChange: (v) => setIn('freeTime.maxMessages', Math.max(0, Number(v))) })),
+          h(Row, { label: '你在跟她聊时' },
+            h(Toggle, {
+              value: (f.pauseWhileOwnerChats !== false),
+              onChange: (v) => setIn('freeTime.pauseWhileOwnerChats', v),
+            }), h('span', { style: S.hint }, '停表——聊多久就把这段时间还给她多久；关掉只是这一拍让路，时间照走')),
           h(Row, { label: '你刚说过话就让路' },
             h(Num, { value: Math.round((Number(f.skipIfActiveMs ?? 300000)) / 60000), step: 1, onChange: (v) => setIn('freeTime.skipIfActiveMs', Math.max(0, Number(v)) * 60000) }),
-            h('span', { style: S.hint }, '分钟内不打扰，0 = 不让路')),
+            h('span', { style: S.hint }, '分钟内不打扰（也是停表后等你安静多久才继续），0 = 不停表')),
           h(Row, { label: '能看到什么程度' },
             h('select', {
               style: S.area,
@@ -1332,7 +1385,7 @@ window.__ModuleLoader__.load({
             }, '让她收工'),
             s
               ? h('span', { style: S.hint }, running
-                  ? `还剩 ${Math.round(s.remainingMs / 60000)} 分钟 · 已 ${s.beats} 拍 · 说了 ${s.messages}/${s.maxMessages} 句`
+                  ? `还剩 ${Math.round(s.remainingMs / 60000)} 分钟 · 已 ${s.beats} 拍 · 说了 ${s.messages}/${s.maxMessages} 句${s.paused ? ` · 你在跟她聊，停表中（已停 ${Math.round((s.pausedMs || 0) / 1000)} 秒）` : ''}`
                   : (s.reason ? `上一段：${s.reason}` : '没在自由活动'))
               : null,
           ),

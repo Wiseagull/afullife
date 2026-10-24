@@ -6,8 +6,11 @@
 //   私聊恒响应 > @我 > 关键词 > 活跃期 > 观望期被点着 > 听着
 export function createRouter({ cfg, now = () => Date.now(), random = Math.random }) {
   const owners = new Set((cfg.owner.userIds || []).map(String));
-  const keywords = (cfg.group?.keywords || [])
-    .map((k) => String(k || '').toLowerCase())
+  // 关键词每轮现读：面板里能改 group.keywords，启动时算一次就再也跟不上。
+  // 顺手 trim 一下：面板里手输的词常常带前后空格，不剪掉的话「全是空格的词」
+  // 会留在列表里，`text.includes('  ')` 能把任何带两个空格的话都判成命中。
+  const keywordList = () => (cfg.group?.keywords || [])
+    .map((k) => String(k || '').trim().toLowerCase())
     .filter(Boolean);
 
   const socialCfg = () => cfg.group?.social || {};
@@ -75,7 +78,7 @@ export function createRouter({ cfg, now = () => Date.now(), random = Math.random
     }
 
     const text = String(msg.text || '').toLowerCase();
-    const hit = keywords.find((k) => text.includes(k));
+    const hit = keywordList().find((k) => text.includes(k));
     if (hit) {
       enterActive(key);
       return { speak: true, reason: `keyword:${hit}` };
@@ -144,5 +147,9 @@ export function createRouter({ cfg, now = () => Date.now(), random = Math.random
     return s.state;
   }
 
-  return { decide, markSpoke, idleCheck, proactiveCheck, stateOf, enterActive, owners, keywords };
+  return {
+    decide, markSpoke, idleCheck, proactiveCheck, stateOf, enterActive, owners,
+    // getter：每次访问现算，外面改完 group.keywords 不用重造 router
+    get keywords() { return keywordList(); },
+  };
 }

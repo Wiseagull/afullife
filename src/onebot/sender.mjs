@@ -18,6 +18,18 @@ export class Sender {
   }
 
   /**
+   * 面板里改了 send.*（分句开关、条间间隔、单条上限、演练开关）之后原地换掉。
+   * 为什么不每轮现读：这些值每发一条都要用，构造时拷进来最快；
+   * 改的时候调一次这个，比把 cfg 塞进每个方法干净。
+   */
+  reconfigure(next = {}) {
+    if (next.maxLen != null) this.maxLen = next.maxLen;
+    if (next.gapMs != null) this.gapMs = next.gapMs;
+    if (next.dryRun != null) this.dryRun = next.dryRun;
+    if (next.split !== undefined) this.split = next.split || { enabled: false };
+  }
+
+  /**
    * 一句一行：她按回车分条，一行就是一条消息。
    * 不再按空格切 —— 中文里空格不是分句号，切出来全是断句不对的碎块。
    */

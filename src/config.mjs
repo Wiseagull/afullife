@@ -79,7 +79,8 @@ const DEFAULTS = {
     maxMessages: 3,             // 这段时间里最多主动说几句
     permission: 'look',         // look 只看不动 / act 可以动手 / full 全套
     minGapMs: 3600000,          // 两段之间至少隔多久
-    skipIfActiveMs: 300000,     // 他这么久之内说过话 → 这一拍让路（0 = 不让路）
+    skipIfActiveMs: 300000,     // 他安静满这么久才算「聊完了」；0 = 不停表
+    pauseWhileOwnerChats: true, // 他在跟她私聊时先停表，安静后顺延（false = 退回老的「只让一拍」）
     room: '',                   // 在哪段对话里活动（空 = 主人私聊）
   },
   debounceMs: 2000,           // 连发聚批窗口（真人连环发消息，等它们凑成一批）
@@ -139,6 +140,21 @@ const DEFAULTS = {
     auditReply: true,         // 发出去之前扫一遍：路径 / 凭据 / token
     // 她可以随便写的地方。留空 = 项目目录 + data + 小本本 + 她干活的工作区（启动时自动凑齐）
     workspaceRoots: [],
+  },
+  // 她此刻在做什么：只认她自己写的 <busy:洗澡:20/>，不从语气里猜。
+  // enabled=false 等于整套关掉：不读盘、不注字、发送节奏一个字不掺。
+  doing: {
+    enabled: true,
+    defaultMinutes: 20,        // 她没说多久时按这个算
+    afterMinutes: 30,          // 忙完之后「刚忙完」这个尾巴留多久
+    busyExtraDelayMs: 4000,    // 在忙时，这一批第一条前面多等多久（只延第一条，绝不拦消息）
+  },
+  // 她也会困。不是关机，是夜里回得慢半拍、句子短一点。
+  rest: {
+    enabled: true,
+    from: 1,                   // 几点开始困（含）
+    to: 7,                     // 几点醒（不含）；from > to 表示跨零点
+    extraDelayMs: 8000,        // 夜里的第一批多等多久
   },
   brain: {
     kind: 'none',             // none（只收不说话）| headless（起一次 DSH 干活）
@@ -311,6 +327,16 @@ export function personaFile(cfg = {}, name = 'self') {
 /** 兴趣账本落在哪儿 */
 export function interestFile(cfg = {}) {
   const rel = cfg?.interests?.file || 'data/interests.json';
+  return path.isAbsolute(rel) ? rel : path.join(ROOT, rel);
+}
+
+/**
+ * 她此刻在忙什么，落在哪儿。
+ * **全局一份，不分房间**：她在群里说去洗澡，私聊里就该是刚洗完。
+ * 分会话存会造出「两个她同时做不同的事」——那是最好认的假。
+ */
+export function doingFile(cfg = {}) {
+  const rel = cfg?.doing?.file || 'data/doing.json';
   return path.isAbsolute(rel) ? rel : path.join(ROOT, rel);
 }
 

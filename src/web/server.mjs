@@ -55,11 +55,13 @@ const EDITABLE = [
   'usage.price',
   'usage.currency',
   'poke',
+  'doing',
+  'rest',
   'web.allowFullAccess',
 ];
 
 /** 改了必须重启桥才生效的 */
-const NEEDS_RESTART = ['debounceMs', 'owner.userIds'];
+const NEEDS_RESTART = ['debounceMs', 'owner.userIds', 'group.social'];
 
 function getPath(obj, p) {
   return p.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
@@ -667,6 +669,13 @@ const pair = (m) => (m && String(m.provider || '').trim() && String(m.model || '
             const images = Array.isArray(body?.images)
               ? body.images.map((s) => String(s || '').trim()).filter(Boolean).slice(0, 9)
               : [];
+            // 字数上限从这里卡：以前 qzone.maxChars 面板上能改，但没人读它（配了个空开关）
+            const maxChars = Number(qc.maxChars) || 0;
+            if (maxChars > 0 && text.length > maxChars) {
+              return json(res, 400, {
+                error: `这条 ${text.length} 字，超过 qzone.maxChars（${maxChars}）。要么改短，要么把上限调大。`,
+              }, origin);
+            }
             if (images.length && qc.allowImages !== true) {
               return json(res, 400, {
                 error: '配图这条路还没通：图床要求传进一个已存在的相册，这个号没有相册。先只发文字。',

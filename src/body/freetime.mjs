@@ -17,6 +17,8 @@ const PROTOCOL = [
   '不想说话、也不想动，就只回 <pass/>。',
   '想再等一会儿（比如等他离开电脑）就只回 <wait:秒>。',
   '觉得这段可以结束了就只回 <done/>。',
+  '手头正要去做什么，想让它算数（你回来它就记得）：在话后面写 `<busy:洗澡:20/>`，数字是大概几分钟。',
+  '忙完了就单独回一句 `<busy:done/>`。这条只有你自己写才算数，不会被从语气里猜出来。',
   '想跟他说一句，就直接说那句话（别加引号、别解释、别写“我打算”）。',
 ].join('\n');
 
@@ -140,8 +142,12 @@ export class FreeTime {
   #thinkMs = 0;        // 这一段想事情一共花了多少毫秒
   #reviewed = false;   // 这一段有没有回顾过
   #openingQuiet = false; // 开场这一句是不是"没人也应"的，允许不回
+  #onBusy = null;        // 她声明「在忙什么」时往外交（见 doing.mjs）
+  #paused = false;       // 他在跟她说话，这一段的表先停住
+  #pausedAt = 0;         // 从什么时候起停的
+  #pausedTotal = 0;      // 这一段一共停了多久（给 status 看）
 
-  constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts, onUsage }) {
+  constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts, onUsage, onBusy }) {
     this.#cfg = cfg;
     this.#brain = brain;
     this.#send = send;
@@ -157,6 +163,8 @@ export class FreeTime {
     this.#interests = interests || null;
     // 草稿箱：这段快结束时递给她，看她想不想写进自己那份
     this.#drafts = drafts || null;
+    // 她自己声明「在忙什么」时往外递（(任务, 分钟) 或 (null) 表示忙完）
+    this.#onBusy = onBusy || null;
   }
 
   get room() { return this.#room; }
@@ -175,6 +183,8 @@ export class FreeTime {
       maxMessages: Number(f.maxMessages ?? 3),
       permission: f.permission || 'look',
       reason: this.#reason,
+      paused: this.#paused,
+      pausedMs: this.#pausedTotal + (this.#paused ? Date.now() - this.#pausedAt : 0),
       // 观测用：咽回去几次、平均每拍想多久——这两个数偏大就该把拍调短
       swallowed: this.#swallowed,
       swallowWhy: this.#swallowWhy,
@@ -202,6 +212,9 @@ export class FreeTime {
     this.#swallowed = 0;
     this.#swallowWhy = '';
     this.#thinkMs = 0;
+    this.#paused = false;
+    this.#pausedAt = 0;
+    this.#pausedTotal = 0;
     this.#sid = null;
     this.#reason = '';
     this.#log('free', `自由活动开始：${Math.round(dur / 60000)} 分钟，权限=${f.permission || 'look'}，最多说 ${f.maxMessages ?? 3} 句`);
@@ -218,9 +231,12 @@ export class FreeTime {
   #finish(reason) {
     this.#running = false;
     this.#reason = reason;
+    this.#paused = false;
+    this.#pausedAt = 0;
     if (this.#timer) { clearTimeout(this.#timer); this.#timer = null; }
     const secs = Math.round((Date.now() - this.#startedAt) / 1000);
-    this.#log('free', `自由活动结束（${reason}）：${secs} 秒，${this.#beats} 拍，说了 ${this.#messages} 句`);
+    const p = this.#pausedTotal ? `，中间他占用 ${Math.round(this.#pausedTotal / 1000)} 秒（已顺延）` : '';
+    this.#log('free', `自由活动结束（${reason}）：${secs} 秒${p}，${this.#beats} 拍，说了 ${this.#messages} 句`);
   }
 
   #schedule(ms) {
@@ -233,6 +249,18 @@ export class FreeTime {
   #tick() {
     this.#timer = null;
     if (!this.#running) return;
+
+    // 他在跟她私聊：这一段的表先停住。
+    //
+    // 以前只是"这一拍让开路"，可他要是不停地说，她的自由时间就一直在流走——
+    // 聊十分钟，她那半小时就少了三分之一，而她那半小时的用处本来就是
+    // 「他不在的时候她有自己的日子」。所以现在真停表，他安静下来再把时间顺延回来。
+    if (this.#paused) {
+      if (this.#ownerTalking()) return this.#pause();
+      return this.#resume();
+    }
+    if (this.#ownerTalking()) return this.#pause();
+
     if (Date.now() >= this.#endsAt) return this.#finish('时间到');
     // 这一拍不占"说话锁"——锁只管真要发出去那一下（见 #say）。
     //
@@ -251,6 +279,49 @@ export class FreeTime {
       }
       this.#schedule(15000);
     });
+  }
+
+  /**
+   * 他是不是正在这个房间说话。
+   *
+   * 只对私聊生效：群里的 lastDir 是"在这个群里最后说话的有人"，谁开口都算，
+   * 那样她一整段都别想动。私聊里那是他一个人，才算"他在占用这段时间"。
+   * 判据用 skipIfActiveMs（默认 5 分钟）：他安静满这么久才算聊完。
+   */
+  #ownerTalking() {
+    const f = this.#cfg.freeTime || {};
+    if (f.pauseWhileOwnerChats === false) return false;
+    if (!String(this.#room).startsWith('private:')) return false;
+    const activeMs = Number(f.skipIfActiveMs ?? 300_000);
+    if (!(activeMs > 0) || !this.#roomState) return false;
+    let st = {};
+    try { st = this.#roomState() || {}; } catch { return false; }
+    const lastTs = Number(st.lastTs) || 0;
+    return st.lastDir === 'in' && lastTs > 0 && Date.now() - lastTs < activeMs;
+  }
+
+  #pause() {
+    if (!this.#paused) {
+      this.#paused = true;
+      this.#pausedAt = Date.now();
+      this.#log('free', '他在跟她说话：这一段先停表（他占的时间不算她的）');
+    }
+    // 每 30 秒回来看一眼他安静了没有——比拍子便宜，也别用 beatMs
+    // （pauseCheckMs 只给自测用，面板不暴露）
+    const f = this.#cfg.freeTime || {};
+    this.#schedule(Number(f.pauseCheckMs) || Math.min(30_000, this.#beatMs()));
+  }
+
+  #resume() {
+    const gap = Math.max(0, Date.now() - this.#pausedAt);
+    this.#paused = false;
+    this.#pausedAt = 0;
+    this.#pausedTotal += gap;
+    // 顺延：停表这段时间不算她的。她说"这一段多长"就该真是多长，
+    // 不能因为他正好在跟她聊天，就把她自己的日子扣掉一块。
+    this.#endsAt += gap;
+    this.#log('free', `他安静下来了：这一段顺延 ${Math.round(gap / 1000)} 秒`);
+    this.#schedule(2000);
   }
 
   async #beat() {
@@ -366,9 +437,29 @@ export class FreeTime {
     try { this.#onUsage?.(this.#room, r, 'free'); } catch { /* 记账失败不影响她说话 */ }
     if (!this.#running) return;
     if (r?.sessionId) this.#sid = r.sessionId;
-    const text = String(r?.text ?? '').trim();
+    let text = String(r?.text ?? '').trim();
     this.#beats += 1;
     this.#thinkMs += Date.now() - t0;
+
+    // 她自己声明「手头在忙什么」：<busy:洗澡:20/>，或 <busy:done/> 收工。
+    // 只认她写出来的这一句，不从语气里猜——猜属于「词表碰状态」，那条线不越。
+    // 声明本身不算说话：剥完什么都不剩就安静接下一拍，不硬凑一句。
+    let busyTask = '';
+    {
+      const hit = text.match(/<busy:\s*([^<>:/]{1,24})\s*(?::\s*(\d{1,3}))?\s*\/?>/i);
+      if (hit) {
+        busyTask = /^done$/i.test(hit[1].trim()) ? '' : hit[1].trim();
+        this.#onBusy?.(busyTask || null, Number(hit[2]) || 0);
+        text = text.replace(/<busy:[^<>]*>/gi, '').trim();
+      }
+    }
+    if (!text) {
+      this.#log('free', `这一拍只声明了状态：${busyTask ? `要去「${busyTask}」` : '忙完了'}`);
+      this.#last = busyTask ? `你刚说要去「${busyTask}」` : '你刚忙完手头的事';
+      this.#schedule(this.#beatMs());
+      return;
+    }
+
     this.#log('free', `第 ${this.#beats} 拍 ${Date.now() - t0}ms：${text.slice(0, 60).replace(/\s+/g, ' ')}`);
 
     // 这一拍想得久，他中途已经开口了：这句话是按开口前的状态想的，不当场发。

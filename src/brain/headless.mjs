@@ -87,6 +87,17 @@ export class HeadlessBrain {
 
   get kind() { return 'headless'; }
 
+  /**
+   * 面板里改了 brain.headless.*（模型、provider、cli、超时…）之后原地换掉。
+   * 为什么需要：构造时是把配置**展开拷进来**的（`{...DEFAULTS, ...opts}`），
+   * 面板改完只动 cfg 里那份，这个副本不动，于是「模型」页改了要重启才认（2026-10-23 踩过）。
+   * 只补传进来的键，别的（默认值、logger）留着。
+   */
+  reconfigure(next = {}) {
+    Object.assign(this.cfg, next);
+    return this.cfg;
+  }
+
   #apiKey() {
     const name = this.cfg.apiKeyEnv;
     if (process.env[name]) return process.env[name];
@@ -271,8 +282,18 @@ export class HeadlessBrain {
         if (buf.trim()) handleLine(buf);
         const text = (finalText || streamed).replace(ANSI, '').trim();
         if (code !== 0) {
-          const detail = (err || errors.join('; ')).replace(ANSI, '').trim().slice(-400);
-          finish(reject, new Error(`headless 退出码 ${code}：${detail || '无输出'}`));
+          // 退出码非 0 时以前只报 stderr 的尾巴，可那里多半是宿主自己的启动横幅
+          // （「windows-computer-use MCP server 0.2.5 ready」这种），真正的原因在 stdout 的
+          // error 事件里，被丢掉了——11 次体检失败因此一直只有一个看不出所以然的 MCP 行。
+          // 现在两边都报：先 stdout 的 error，再 stderr 去掉横幅后剩下的，最后补一句事件计数。
+          const fromStdout = errors.join('; ').replace(ANSI, '').trim();
+          const noise = /MCP server .*ready/i;
+          const errLines = err.replace(ANSI, '').trim().split('\n').map((s) => s.trim());
+          const meaningful = errLines.filter((s) => s && !noise.test(s));
+          const fromStderr = (meaningful.length ? meaningful : errLines).join(' ').slice(-400);
+          const seen = `${eventCount} 条事件，最后 ${lastEventKind || '无'}`;
+          const detail = [fromStdout, fromStderr].filter(Boolean).join(' | ');
+          finish(reject, new Error(`headless 退出码 ${code}：${((detail || '无输出') + `（${seen}）`).slice(-700)}`));
           return;
         }
         if (errors.length && !text) {

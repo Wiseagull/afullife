@@ -4,7 +4,7 @@ import { normalizeEvent, resolveQuote, shortenQuote, renderTranscript, withFiles
 import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
-import { openingMood, draftLines, shouldYield } from '../src/body/freetime.mjs';
+import { FreeTime, openingMood, draftLines, shouldYield } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
 import { buildPrompt, buildTriggerLines, videoHint } from '../src/body/prompt.mjs';
 import { sniffImage, sniffVideo } from '../src/media/sniff.mjs';
@@ -15,6 +15,12 @@ import { ROOT } from '../src/config.mjs';
 import { handoverPrompt, cleanHandover } from '../src/memory/handover.mjs';
 import { personaNoteFor } from '../src/body/persona-note.mjs';
 import { EventLog } from '../src/memory/events.mjs';
+import { Sender } from '../src/onebot/sender.mjs';
+import { PokeCooldown } from '../src/body/poke.mjs';
+import { HeadlessBrain } from '../src/brain/headless.mjs';
+import { restState, restLine } from '../src/body/rest.mjs';
+import { Doing } from '../src/body/doing.mjs';
+import { dedupe } from '../src/memory/upkeep.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -793,6 +799,120 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('先回一句：要求只回一句、不超过 40 字', p.includes('不超过 40 字'), true);
   check('先回一句：人设垫在最前面', p.startsWith('【你自己】'), true);
 }
+// ── 面板热生效：改了配置，组件手里那份也得跟着变 ──────────
+// 以前这些是构造时拷进去的，面板改完要重启桥才认（2026-10-23 踩过）。
+{
+  const sender = new Sender({ client: null, maxLen: 100, gapMs: 10, split: { enabled: true, softMax: 50 } });
+  check('热生效：发送器改之前单条上限', sender.maxLen, 100);
+  sender.reconfigure({ maxLen: 2000, gapMs: 0, split: { enabled: false } });
+  check('热生效：发送器换单条上限', sender.maxLen, 2000);
+  check('热生效：发送器换分句开关', sender.split.enabled, false);
+  check('热生效：发送器没传的字段不动', sender.gapMs, 0);
+
+  const cd = new PokeCooldown(1000);
+  cd.mark('r', 0);
+  ok('热生效：戳一戳改之前 1 秒内算冷却', cd.hot('r', 500) === true);
+  cd.setMs(100);
+  ok('热生效：戳一戳改成 100ms 后不再冷却', cd.hot('r', 500) === false);
+
+  const live = { owner: { userIds: [] }, group: { keywords: ['早'] } };
+  const routerLive = createRouter({ cfg: live, now: () => 0 });
+  check('热生效：router 关键词现读', routerLive.keywords, ['早']);
+  live.group.keywords = ['晚安', '  '];
+  check('热生效：改完 group.keywords 不用重造 router', routerLive.keywords, ['晚安']);
+
+  const brainLive = new HeadlessBrain({ model: 'old' });
+  brainLive.reconfigure({ model: 'new' });
+  check('热生效：headless 换模型', brainLive.cfg.model, 'new');
+
+  // 重活脑子外面套的那层壳（main.mjs 的 withModel）：壳只管「用哪个模型」，
+  // 别的都得透过去。早前是手写白名单只转发 kind + run，2026-10-24 交接纸条
+  // 就因为 kind 丢了、一张都没写成；补上 kind 之后 reconfigure 还在名单外，
+  // 所以改成挂原型链——这两条守的就是那个契约。
+  const shellBase = new HeadlessBrain({ model: 'x' });
+  const shell = Object.create(shellBase);
+  shell.run = (opts) => shellBase.run(opts);
+  check('套壳：kind 透得过去（交接纸条靠它认是不是 headless）', shell.kind, 'headless');
+  check('套壳：reconfigure 也透得过去', typeof shell.reconfigure, 'function');
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok('套壳：withModel 不再是手写白名单', /const shell = Object\.create\(base\)/.test(mainSrc) && !/kind: base\.kind/.test(mainSrc));
+}
+
+// ── 她手头的事 / 她也会困 ─────────────────────────────────
+// 这两层都是「让她有自己的日子」，所以判错的代价不是报错，是穿帮。
+{
+  const atHour = (h) => new Date(2026, 9, 24, h, 30, 0, 0).getTime();
+
+  ok('困：凌晨三点算在睡区间里', restState({ enabled: true, from: 1, to: 7 }, atHour(3)) !== null);
+  check('困：中午不在睡区间', restState({ enabled: true, from: 1, to: 7 }, atHour(12)), null);
+  ok('困：跨零点（23~5）凌晨两点算睡着', restState({ enabled: true, from: 23, to: 5 }, atHour(2)) !== null);
+  ok('困：跨零点（23~5）下午两点算醒着', restState({ enabled: true, from: 23, to: 5 }, atHour(14)) === null);
+  check('困：关掉就不困', restState({ enabled: false, from: 1, to: 7 }, atHour(3)), null);
+  check('困：醒着时提示词是空的', restLine({ enabled: true, from: 1, to: 7 }, atHour(12)), '');
+  ok('困：睡着时提示词不是空的', restLine({ enabled: true, from: 1, to: 7 }, atHour(3)).length > 0);
+
+  const f = path.join(os.tmpdir(), `qad-doing-${process.pid}.json`);
+  fs.rmSync(f, { force: true });
+  const doing = new Doing({ file: f, cfg: { defaultMinutes: 20, afterMinutes: 30 }, logger: () => {} });
+  check('在忙：没写过就是空', doing.read(), null);
+  doing.set('洗澡', 10);
+  const st = doing.read();
+  check('在忙：记下她在做什么', st.doing, '洗澡');
+  ok('在忙：还算得出来剩多久', st.leftMs > 0);
+  ok('在忙：不是刚忙完', st.justDone === false);
+  doing.clear();
+  const st2 = doing.read();
+  ok('在忙：说忙完了先进「刚忙完」', st2.justDone === true);
+  fs.rmSync(f, { force: true });
+
+  const fake = [
+    { id: 'a', kind: '事实', text: '先生今天在改桥的配置面板', room: 'p' },
+    { id: 'b', kind: '事实', text: '先生今天在改桥的配置面板！', room: 'p' },
+    { id: 'c', kind: '事实', text: '先生明天要去看牙', room: 'p' },
+    { id: 'd', kind: '约定', text: '不叫醒先生', room: 'p' },
+    { id: 'e', kind: '约定', text: '不叫醒先生', room: 'p' },
+  ];
+  const { kept, dups } = dedupe(fake);
+  check('去重：同一句话两条只留一条', dups.length, 1);
+  check('去重：并进先记的那条', dups[0].into, 'a');
+  ok('去重：不相干的条目不动', kept.some((x) => x.id === 'c'));
+  check('去重：约定一个字都不碰', kept.filter((x) => x.kind === '约定').length, 2);
+}
+// ── 自由活动停表：他在跟她聊，这段时间就不该白烧 ──────────
+// 以前只是「这一拍让路」，他聊十分钟，她那半小时就少了十分钟——
+// 而她那半小时的用处本来就是「他不在的时候她有自己的日子」。
+{
+  let ownerBusy = true;
+  const ft = new FreeTime({
+    cfg: {
+      freeTime: {
+        beatMs: 60000, skipIfActiveMs: 300000, pauseWhileOwnerChats: true,
+        pauseCheckMs: 40, durationMs: 1800000, maxMessages: 3, permission: 'look',
+      },
+    },
+    brain: { run: async () => ({ text: '<done/>' }) },
+    send: async () => {},
+    logger: () => {},
+    room: 'private:1',
+    roomState: () => (ownerBusy
+      ? { lastDir: 'in', lastTs: Date.now() }
+      : { lastDir: 'in', lastTs: Date.now() - 400000 }),
+  });
+  const s0 = ft.start({ minutes: 30 }).status;
+  check('停表：刚开始表在走', s0.paused, false);
+  await new Promise((r) => setTimeout(r, 2100));
+  const s1 = ft.status();
+  check('停表：他在说话就先停下', s1.paused, true);
+  check('停表：停下期间到点时间不往前跑', s1.endsAt, s0.endsAt);
+  ownerBusy = false;
+  // 停表期间的检查间隔被 #schedule 的 1 秒下限夹住，等过它
+  await new Promise((r) => setTimeout(r, 1300));
+  const s2 = ft.status();
+  check('停表：他安静了就继续', s2.paused, false);
+  ok('停表：把停掉的那段时间还给她（顺延）', s2.endsAt > s1.endsAt);
+  ft.stop('测试结束');
+}
+
 // ── 结果 ────────────────────────────────────────────────
 if (fails.length) {
   console.log(`✗ ${fails.length} 个失败 / ${pass} 个通过\n`);

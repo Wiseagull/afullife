@@ -35,12 +35,67 @@ export function parseOps(raw) {
   }
 }
 
+const DUP_THRESHOLD = 0.8;
+
+/** 两条说法字面上有多像（0~1）。只去标点数字、取二元组交集，纯函数，不花 token。 */
+function similar(a, b) {
+  const norm = (s) => String(s || '').replace(/[\s\p{P}\p{S}\d]/gu, '');
+  const A = norm(a);
+  const B = norm(b);
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  const grams = (s) => {
+    const g = new Set();
+    for (let i = 0; i < s.length - 1; i += 1) g.add(s.slice(i, i + 2));
+    return g;
+  };
+  const GA = grams(A);
+  const GB = grams(B);
+  if (!GA.size || !GB.size) return A === B ? 1 : 0;
+  let hit = 0;
+  for (const g of GA) if (GB.has(g)) hit += 1;
+  return hit / (GA.size + GB.size - hit);
+}
+
+/**
+ * 机械去重：同 kind、同一房间里字面几乎一样的两条，只留一条。
+ *
+ * 为什么交给代码而不是模型：这是纯计算能算准的事。让模型来分「差不多」和「同一件」，
+ * 误判的代价是改掉她真的记过的事——比漏合并一条贵得多。所以阈值故意定高（0.8），
+ * 只抓「同一句话说了两遍」这种，不碰措辞相近的两件事。
+ * 约定 / 偏好一律不动（她跟人的关系不能由字面相似度改）。
+ *
+ * @returns {{kept: object[], dups: {id:string, text:string, into:string}[]}}
+ */
+export function dedupe(items = []) {
+  const kept = [];
+  const dups = [];
+  const buckets = new Map();
+  for (const it of items) {
+    if (it.kind === '约定' || it.kind === '偏好') { kept.push(it); continue; }
+    const key = `${it.kind}|${it.room || ''}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    const bucket = buckets.get(key);
+    const host = bucket.find((x) => similar(x.text, it.text) >= DUP_THRESHOLD);
+    if (host) { dups.push({ id: it.id, text: it.text, into: host.id }); continue; }
+    bucket.push(it);
+    kept.push(it);
+  }
+  return { kept, dups };
+}
+
 /**
  * 跑一次体检。
  * @returns {Promise<null|{staled:number,updated:number,merged:number,conflicts:number,checked:number}>}
  */
 export async function upkeep({ brain, notes, pending = null, logger = null, maxOps = 8 }) {
-  const items = notes.active();
+  const all = notes.active();
+  // 先机械去重（真的合并，不是只报告）：重复条目会随流水越攒越多，
+  // 交给模型每轮去认太贵也太飘——能算准的部分就别问模型。
+  const { kept, dups } = dedupe(all);
+  for (const d of dups) notes.stale(d.id, `和 ${d.into} 是同一件事（机械合并）`);
+  if (dups.length) logger?.('upkeep', `机械合并 ${dups.length} 条重复`);
+  const items = kept;
   if (items.length < 8) {
     logger?.('upkeep', `记忆才 ${items.length} 条，先不体检`);
     return null;

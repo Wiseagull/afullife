@@ -207,7 +207,7 @@ export function videoHint() {
   ].join('');
 }
 
-export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null, usageLine = '', voice = '' }) {
+export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null, usageLine = '', voice = '', state = '' }) {
   const lines = [];
 
   lines.push(`【房间】${roomKey}`);
@@ -253,6 +253,12 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
     lines.push('');
     lines.push(extra);
   }
+  // 她此刻的状态（在忙什么、几点 / 困不困）。
+  // 排在规程之后、说话例子之前：它是「当下」，不是「人设」，也不该压住说话的样子。
+  if (state) {
+    lines.push('');
+    lines.push(state);
+  }
   lines.push('');
   // 例子比规矩管用：把「她平时怎么说话」摆到最后，压住上面那几十行规程的腔调
   if (voice) {
@@ -268,7 +274,7 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
  * 接着上次说时用：只把这次要回的话递过去（外加一小段别处的动静）。
  * 本房间的上下文由会话自己记着。
  */
-export function buildFollowup(messages, { delta = '', isGroup = false, addressed = false, selfNames = [], stickerLine = '', personaNote = '', rules = '', usageLine = '', voice = '' } = {}) {
+export function buildFollowup(messages, { delta = '', isGroup = false, addressed = false, selfNames = [], stickerLine = '', personaNote = '', rules = '', usageLine = '', voice = '', state = '' } = {}) {
   // 人格每一轮都要带：会话是接着聊的，但提示词每轮新拼，不放进去她就只剩记忆和对白
   const person = personaNote ? personaNote + String.fromCharCode(10, 10) : '';
   const usage = usageBlock(usageLine);
@@ -278,15 +284,16 @@ export function buildFollowup(messages, { delta = '', isGroup = false, addressed
     : renderTranscript(messages);
   const tail = stickerLine ? `\n\n${stickerLine}` : '';
   const voiceBlockPart = voice ? `${BLANK}${voice}` : '';
+  const stateBlockPart = state ? `${BLANK}${state}` : '';
   // 接话时默认不挂规程（闲聊最多）；要动手时调用方把全套传进来
   const ruleBlock = rules ? BLANK + rules : '';
-  if (!isGroup) return person + head + body + tail + ruleBlock + voiceBlockPart + BLANK + VOICE_ANCHOR;
+  if (!isGroup) return person + head + body + tail + ruleBlock + stateBlockPart + voiceBlockPart + BLANK + VOICE_ANCHOR;
 
   // 群聊：点名了就直说；没点名就提醒一句"不想接可以 PASS"（一句话，不重复整段规则）
   const hint = addressed
     ? '（群里，这句点了你的名，正常接。）'
     : '（群里，没点你名。想接就接，接不上只回 PASS。）';
-  return `${person}${head}${body}\n\n${hint}${tail}${ruleBlock}${voiceBlockPart}${BLANK}${VOICE_ANCHOR}`;
+  return `${person}${head}${body}\n\n${hint}${tail}${ruleBlock}${stateBlockPart}${voiceBlockPart}${BLANK}${VOICE_ANCHOR}`;
 }
 
 /**
