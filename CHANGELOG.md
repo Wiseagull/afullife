@@ -2,6 +2,29 @@
 
 版本号按 `主.次.修` 走；每次改了什么、为什么改，记在这儿。
 
+## 0.4.0
+
+**她能发 QQ 空间了（读、发、删），只能发文字；小本本多了一页她自己写的索引。**
+
+- **QQ 空间**：空间没有 OneBot 接口，走 SnowLuma 的扩展 action `get_cookies`
+  （`domain=user.qzone.qq.com`）拿回整串 cookie，用里面的 `skey` 算 `g_tk`，再打
+  `emotion_cgi_msglist_v6` / `emotion_cgi_publish_v6` / `emotion_cgi_delete_v6`
+  （`src/qzone/client.mjs`）。发之前过闸（`gate.check('qzone_publish')`），
+  命令行也打 `/api/qzone`，外发只有一个出口；发失败不重试——重试会连发两条。
+  配置里 `qzone` 默认关着（外发的东西不该没有闸地跑）。
+- **为什么只能发文字、不能配图**：空间图床 `cgi_upload_image` 必须传进一个**已存在的相册**，
+  而这个号一个相册都没有（`albumsInUser: 0`；`uploadtype` 0~4 全试过，带不带 `albumid`
+  都只回「相册信息为空」或「相册不存在」，建相册的几个端点全 405）。
+  所以 `qzone.allowImages` 默认 `false`，带图会被**明确拒掉**，不会发出半截子。
+  以后要配图，得先在空间里手动建一个相册——那会在她空间里多一个别人看得见的相册，
+  这一步留给你决定。
+- **小本本索引**（她自己写、自己提交的）：`node scripts/notebook.mjs index` 扫 `notebook/` 下所有
+  `.md`，每条出一行「原文一截 + → file:line」。只指路、不生产内容，要细节按门牌回去读那一行。
+  顺手修了四处：同一句出现两次会永远指到第一次、按 UTF-16 码元切会把 emoji 切成半个字符、
+  只有非「时间 + 内容」格式 bullet 的文件整份被跳过、`INDEX.md` 会被 `git add` 扫进仓库。
+- **自检**：203 → 217 项；`probe-gate` 35 过 / 0 不过；源码里不再留任何字面盘符
+  （用例里的假路径改成运行期 `path.join(os.tmpdir(), …)`）。
+
 ## 0.3.4
 
 **她能看视频了；模型分成三个槽位，账单不再一锅烩。**
