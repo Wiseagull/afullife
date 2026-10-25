@@ -366,6 +366,8 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState({ text: '', kind: '事实', weight: 2 });
       const [err, setErr] = useState('');
       const [editing, setEditing] = useState({});
+      const [order, setOrder] = useState('asc');        // asc = 早的在上 / desc = 晚的在上
+      const [roomFilter, setRoomFilter] = useState('*'); // '*' = 全部房间 / '' = 没归房间的那些 / 'group:xxx' = 某一个
 
       const load = useCallback(async () => {
         try {
@@ -398,6 +400,24 @@ window.__ModuleLoader__.load({
         } catch (e) { setErr(e.message); }
       };
 
+      // 按发生时间排，正序倒序可切；同一天归一组。存储一个字不动，只改这里怎么看。
+      const roomOf = (n) => n.room || '';
+      const roomLabel = (k) => (k.startsWith('group:') ? '群 ' + k.slice(6)
+        : k.startsWith('private:') ? '私聊 ' + k.slice(8) : k || '未分房间');
+      const roomKeys = [...new Set(notes.map(roomOf))].filter(Boolean).sort();
+      const looseCount = notes.filter((n) => !roomOf(n)).length;
+      const shownNotes = roomFilter === '*' ? notes : notes.filter((n) => roomOf(n) === roomFilter);
+      const sortedNotes = shownNotes.slice()
+        .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+      if (order === 'desc') sortedNotes.reverse();
+      const dayGroups = [];
+      for (const n of sortedNotes) {
+        const day = String(n.at || '').slice(0, 10) || '没记时间';
+        const last = dayGroups[dayGroups.length - 1];
+        if (last && last.day === day) last.items.push(n);
+        else dayGroups.push({ day, items: [n] });
+      }
+
       return h(
         'div',
         null,
@@ -415,23 +435,48 @@ window.__ModuleLoader__.load({
             h('button', { style: S.btn(true), onClick: add }, '记下'),
           ),
         ),
-        h('div', { style: S.tiny }, '共 ' + notes.length + ' 条'),
-        notes.map((n) =>
-          h('div', { key: n.id, style: S.item },
-            h('div', { style: { flex: 1 } },
-              editing[n.id]
-                ? h('input', {
-                    style: Object.assign({}, S.input, { width: '100%' }),
-                    value: editing[n.id].text,
-                    onChange: (e) => setEditing(Object.assign({}, editing, { [n.id]: Object.assign({}, editing[n.id], { text: e.target.value }) })),
-                  })
-                : h('div', null, n.text),
-              h('div', { style: S.tiny }, '[' + n.kind + '] 权重 ' + n.weight + (n.room ? ' · ' + n.room : '') + ' · ' + n.id),
+        h('div', { style: Object.assign({}, S.row, { marginTop: 10 }) },
+          h('select', {
+            style: Object.assign({}, S.input, { flex: 1 }),
+            value: roomFilter,
+            onChange: (e) => setRoomFilter(e.target.value),
+          },
+            h('option', { value: '*' }, '全部房间 · ' + notes.length + ' 条'),
+            looseCount ? h('option', { value: '' }, '未分房间 · ' + looseCount + ' 条') : null,
+            roomKeys.map((k) => h('option', { key: k, value: k },
+              roomLabel(k) + ' · ' + notes.filter((n) => roomOf(n) === k).length + ' 条')),
+          ),
+          h('button', {
+            style: S.btn(false),
+            onClick: () => setOrder(order === 'asc' ? 'desc' : 'asc'),
+          }, order === 'asc' ? '早的在上 ↑' : '晚的在上 ↓'),
+        ),
+        h('div', { style: S.tiny }, '显示 ' + shownNotes.length + ' / ' + notes.length + ' 条'),
+        dayGroups.map((g) =>
+          h('div', { key: g.day },
+            h('div', { style: Object.assign({}, S.tiny, { margin: '14px 0 4px', fontWeight: 600, opacity: 0.85 }) },
+              g.day + ' · ' + g.items.length + ' 条'),
+            g.items.map((n) =>
+              h('div', { key: n.id, style: n.staleAt ? Object.assign({}, S.item, { opacity: 0.5 }) : S.item },
+                h('div', { style: { flex: 1 } },
+                  editing[n.id]
+                    ? h('input', {
+                        style: Object.assign({}, S.input, { width: '100%' }),
+                        value: editing[n.id].text,
+                        onChange: (e) => setEditing(Object.assign({}, editing, { [n.id]: Object.assign({}, editing[n.id], { text: e.target.value }) })),
+                      })
+                    : h('div', null, n.text),
+                  h('div', { style: S.tiny },
+                    '[' + n.kind + '] ' + String(n.at || '').slice(11, 16) + ' · 权重 ' + n.weight
+                    + (n.room ? ' · ' + n.room : '') + ' · ' + n.id),
+                  n.staleAt ? h('div', { style: S.tiny }, '已过时' + (n.staleWhy ? '：' + String(n.staleWhy).slice(0, 90) : '')) : null,
+                ),
+                editing[n.id]
+                  ? h('button', { style: S.btn(true), onClick: () => save(n.id) }, '存')
+                  : h('button', { style: S.btn(false), onClick: () => setEditing(Object.assign({}, editing, { [n.id]: { text: n.text } })) }, '改'),
+                h('button', { style: S.btn(false), onClick: () => drop(n.id) }, '删'),
+              ),
             ),
-            editing[n.id]
-              ? h('button', { style: S.btn(true), onClick: () => save(n.id) }, '存')
-              : h('button', { style: S.btn(false), onClick: () => setEditing(Object.assign({}, editing, { [n.id]: { text: n.text } })) }, '改'),
-            h('button', { style: S.btn(false), onClick: () => drop(n.id) }, '删'),
           ),
         ),
       );

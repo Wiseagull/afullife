@@ -1025,6 +1025,15 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('退出码：看到 final 就记一笔，后面来什么都顶不掉', hsrc.includes('sawFinal = true'));
 }
 
+// ── 记忆写在"你"的视角 ─────────────────────────────────────
+// 2026-10-25 之前提要里写的是「第三人称」，于是她每天读几百条「她要…」「小鲸鱼…」，
+// 读自己的记忆像读别人的档案。改成第一人称视角之后，注入那边一个字都不用动。
+{
+  const dsrc = fs.readFileSync(path.join(ROOT, 'src/memory/distill.mjs'), 'utf8');
+  ok('记忆：要写成"你"的视角', dsrc.includes('"你"的视角'));
+  ok('记忆：不许再要求第三人称', !dsrc.includes('第三人称'));
+}
+
 // ── 结果 ────────────────────────────────────────────────
 if (fails.length) {
   console.log(`✗ ${fails.length} 个失败 / ${pass} 个通过\n`);
