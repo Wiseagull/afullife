@@ -22,6 +22,17 @@ const PROTOCOL = [
   '想跟他说一句，就直接说那句话（别加引号、别解释、别写“我打算”）。',
 ].join('\n');
 
+// 她把给程序看的标记单独写一行夹在话里时（「……先站起来走两步。\n<pass/>」），
+// 发之前得剥掉。整段只有标记的情形由调用处那几个分支先处理，这里只管「话 + 标记」。
+// 2026-10-25 13:38 那次就把 <pass/> 原样发进了群里。
+export function stripMarks(text) {
+  return String(text ?? '')
+    .replace(/^[ \t]*<(?:pass|done|wait:\s*\d+|busy:[^<>]*)\s*\/?>[ \t]*$/gim, '')
+    .replace(/[ \t]*<(?:pass|done|wait:\s*\d+)\s*\/?>/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function fmtMs(ms) {
   const m = Math.max(0, Math.round(ms / 60000));
   return `${m} 分钟`;
@@ -552,7 +563,18 @@ export class FreeTime {
       return;
     }
 
-    const sent = await this.#say(text, {
+    // 她会把标记单独写一行夹在话里（「……先站起来走两步。\n<pass/>」）。
+    // 整段只有标记时上面几个分支已经处理掉了，走到这儿还留着标记，说明是
+    // 「话 + 标记」，发之前得剥干净——2026-10-25 13:38 就是把 <pass/> 原样发进了群里。
+    const spoken = stripMarks(text);
+    if (!spoken) {
+      this.#last = '这一拍她只留了标记，没有话。';
+      this.#log('free', `只有标记（${text.slice(0, 40).replace(/\s+/g, ' ')}），不发`);
+      this.#schedule(this.#beatMs());
+      return;
+    }
+
+    const sent = await this.#say(spoken, {
       free: opening && !this.#openingQuiet,
       // 分几条发的时候，中间那几秒里他可能插话——每发下一条之前再问一次。
       // 同样按"算不算打断"判：他只是在催，就继续说下去。

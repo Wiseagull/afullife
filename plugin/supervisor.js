@@ -63,9 +63,19 @@ export function startBridge(opts = {}) {
   if (opts.force && pidAlive(pid)) {
     note(`强制重启：先清掉 pid ${pid}`);
     kill(pid);
+    // 这里是同步函数，阻塞多久 DSH 的 web 就卡多久——所以只等 4 秒。
+    // 真正该等的活在 stopBridgeHard 里（异步，12 秒），走到这儿正常早就清干净了。
     const until = Date.now() + 4000;
     while (pidAlive(pid) && Date.now() < until) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
+    if (pidAlive(pid)) {
+      note(`强制重启：pid ${pid} 等了几秒还没退，强杀整棵进程树`);
+      killTree(pid);
+      const hard = Date.now() + 4000;
+      while (pidAlive(pid) && Date.now() < hard) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+      }
     }
   } else if (pidAlive(pid)) {
     const owner = readOwner();
@@ -128,8 +138,18 @@ export function stopBridge(handle) {
  * 只是 kill() 完就立刻 startBridge，pid 文件还没来得及被清，
  * 新进程会以为"已经有一只"直接退出——桥就这么停在半路了。
  */
-export async function stopBridgeHard(handle, { gracefulMs = 4000 } = {}) {
-  const pid = handle?.child?.pid ?? handle?.adoptedPid ?? readPid();
+export async function stopBridgeHard(handle, { gracefulMs = 12000 } = {}) {
+  // 这里等的不是「kill 发出去了」，是「它真的没了」。桥收到 SIGTERM 后要等后台队列
+  // 收尾（src/main.mjs 给了 8 秒上限），原来只等 4 秒——2026-10-25 15:02 面板上
+  // 「重启桥」就卡在这：旧桥还在，新桥抢锁失败 exit(1)，UI 却显示成功。
+  //
+  // 另外 handle 里的 pid 可能早就死了（DSH 热重载换过一代），这时要回退到 pid 文件，
+  // 否则会对着一个死 pid「等它退出」，真正在跑的那只一个字节都没动。
+  const fromChild = handle?.child?.pid;
+  const fromAdopt = handle?.adoptedPid;
+  const pid = (fromChild && pidAlive(fromChild)) ? fromChild
+    : (fromAdopt && pidAlive(fromAdopt)) ? fromAdopt
+      : readPid();
   if (!pid) return true;
   if (handle?.child && !handle.child.killed) {
     try { handle.child.kill(); } catch { /* 已经没了 */ }
@@ -154,4 +174,21 @@ export async function stopBridgeHard(handle, { gracefulMs = 4000 } = {}) {
   try { fs.unlinkSync(PID_FILE); } catch { /* 没有就算了 */ }
   note(`桥已停（pid ${pid}）`);
   return true;
+}
+
+/**
+ * 起来之后它是不是**还活着**。面板点「重启」最怕的不是起不来，是
+ * 「起来了、一秒内又悄悄退了」——那时 UI 报成功、端口还归旧的那只，
+ * 要等到她该说话却没人回才发现。2026-10-25 15:02 就是这样。
+ * @returns {Promise<boolean>} true = 到点还活着
+ */
+export async function waitBridgeUp(handle, ms = 5000) {
+  const pid = handle?.child?.pid;
+  if (!pid) return !!handle?.adoptedPid;
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (!pidAlive(pid)) return false;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return pidAlive(pid);
 }

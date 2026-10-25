@@ -7,7 +7,7 @@ import { Buffer } from 'node:buffer';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startBridge, stopBridge, stopBridgeHard } from './supervisor.js';
+import { startBridge, stopBridge, stopBridgeHard, waitBridgeUp } from './supervisor.js';
 import { readToken, TOKEN_HEADER } from '../src/web/token.mjs';
 
 export const name = 'afullife-panel';
@@ -53,6 +53,10 @@ export function apply(ctx) {
             try {
               await stopBridgeHard(bridge);
               bridge = startBridge({ force: true });
+              // 起完不等于成了：旧的还占着锁时新桥会 exit(1)，而这里什么都不做的话
+              // 面板照样显示「重启成功」。等几秒确认它还活着再回话。
+              const up = await waitBridgeUp(bridge);
+              if (!up) throw new Error('新桥起来又退了（多半旧的还占着 lock），看 data/logs 里的日志');
               const pid = bridge?.child?.pid ?? bridge?.adoptedPid ?? null;
               const t = JSON.stringify({ ok: true, pid, ms: Date.now() - t0 });
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(t), 'cache-control': 'no-store' });

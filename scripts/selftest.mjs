@@ -4,7 +4,7 @@ import { normalizeEvent, resolveQuote, shortenQuote, renderTranscript, withFiles
 import { createRouter } from '../src/body/router.mjs';
 import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
-import { FreeTime, openingMood, draftLines, shouldYield } from '../src/body/freetime.mjs';
+import { FreeTime, openingMood, draftLines, shouldYield, stripMarks } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
 import { buildPrompt, buildTriggerLines, videoHint } from '../src/body/prompt.mjs';
 import { sniffImage, sniffVideo } from '../src/media/sniff.mjs';
@@ -298,6 +298,19 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('白天正常开口', openingMood(inAt(at(13, 20), '刚吃完饭'), { now }).quiet, false);
   // 最后一句是我说的也算：只要他隔了够久
   check('我说完他就没影了', openingMood({ lastTs: at(9, 0), lastDir: 'out', lastInTs: at(8, 50), lastInText: '早' }, { now }).quiet, true);
+}
+
+// ── 自由活动的标记别被她原样发出去 ──────────────────────
+// 2026-10-25 13:38：她先说了「小憩还没醒透……先站起来走两步。」，又单独写一行
+// <pass/>，那行跟着一起发进了群里。整段只有标记的情形各分支早处理了，漏的是「话 + 标记」。
+{
+  ok('标记：话后面跟 <pass/> → 剥掉', stripMarks('小憩还没醒透，先站起来走两步。\n<pass/>') === '小憩还没醒透，先站起来走两步。');
+  ok('标记：<pass /> 带空格也剥', stripMarks('好的\n<pass />') === '好的');
+  ok('标记：话中间夹 <done/> 也剥', stripMarks('我去睡了<done/>') === '我去睡了');
+  ok('标记：只剩标记 → 空，当作这一拍不说话', stripMarks('<pass/>') === '');
+  ok('标记：空行和残渣不留下', stripMarks('好\n\n\n<pass/>\n\n') === '好');
+  ok('标记：正常的话一个字不动', stripMarks('今天天气不错') === '今天天气不错');
+  ok('标记：<busy:洗澡:20/> 也别漏出去', stripMarks('我去洗澡\n<busy:洗澡:20/>') === '我去洗澡');
 }
 
 // ── 自由活动说过的话，接话时要摆回她眼前 ────────────────
