@@ -22,6 +22,7 @@ import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
 import { NotesStore } from './memory/notes.mjs';
 import { makeHandover } from './memory/handover.mjs';
+import { createPersonaGuard } from './memory/persona-guard.mjs';
 import { asidePrompt, describeDoing } from './body/aside.mjs';
 import { buildBackground, buildDelta, selfLines } from './memory/context.mjs';
 import { PendingStore } from './memory/pending.mjs';
@@ -39,6 +40,7 @@ import { restLine, restState, justWoke } from './body/rest.mjs';
 import { startAutoFree } from './body/freetime-auto.mjs';
 import { SerialQueue } from './body/queue.mjs';
 import { createBrain } from './brain/index.mjs';
+import { stallNote, FailBook } from './brain/stall.mjs';
 import { Gate, classify } from './safety/gate.mjs';
 import { acquireLock } from './util/lock.mjs';
 import os from 'node:os';
@@ -79,8 +81,19 @@ if (!lock.ok) {
 }
 
 // 心跳：让锁能分辨"活着"和"卡死了"
+// 顺手每 30 秒看一眼 self.md：文件工具直接改它时不走备份（2026-10-24 丢过一整段），
+// 这里把"改之前"那份补存下来。看门人自己出问题不许拖垮心跳。
+const personaGuard = createPersonaGuard({
+  file: path.join(ROOT, 'persona', 'self.md'),
+  backupDir: path.join(cfg.dataDir, 'persona-backups'),
+  stateDir: path.join(cfg.dataDir, 'persona-guard'),
+  logger: L,
+});
 {
-  const beat = () => { try { fs.writeFileSync(heartbeatFile, String(Date.now()), 'utf8'); } catch { /* ignore */ } };
+  const beat = () => {
+    try { fs.writeFileSync(heartbeatFile, String(Date.now()), 'utf8'); } catch { /* ignore */ }
+    try { personaGuard.tick(); } catch { /* ignore */ }
+  };
   beat();
   setInterval(beat, 30000).unref?.();
 }
@@ -124,6 +137,8 @@ const sessions = new SessionMap({ file: path.join(cfg.dataDir, 'sessions.json') 
 // 每个房间上一轮用的是哪个档位（轻装 / 全量）：同一会话里换档，工具定义那段前缀就变了，
 // 上一轮的 prompt cache 接不上。只记下来，好从日志里看出换得有多勤（不改行为）。
 const lastProfile = new Map();
+// 哪个房间上一轮三轮全塌了：不发任何东西出去，等她下次开口时把这件事放回她眼前。
+const fails = new FailBook();
 const roomNames = new RoomNames({ file: path.join(cfg.dataDir, 'rooms.json') });
 const notes = new NotesStore({ file: path.join(cfg.dataDir, 'memory', 'notes.jsonl') });
 const cursorFile = path.join(cfg.dataDir, 'memory', 'cursor.json');
@@ -1019,7 +1034,11 @@ async function handleBatch(roomKey, msgs) {
   if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
   L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
   const stateText = stateLine();
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey), state: stateText });
+  // 上一轮她这边三轮全塌：不替她说话，只把「有这么件事」放回她眼前，由她决定提不提。
+  // 只在他俩私聊里提——群里有第三人在场，翻这种旧账既没意义，也轮不到别人知道。
+  const recall = asGroup ? '' : fails.take(roomKey);
+  const recallPart = recall ? `\n\n${recall}` : '';
+  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey), state: stateText }) + recallPart;
   let prompt = sid
     ? buildFollowup(msgs, {
       delta, isGroup: asGroup, addressed, selfNames: names, stickerLine,
@@ -1028,7 +1047,7 @@ async function handleBatch(roomKey, msgs) {
       usageLine: usageLineFor(roomKey),
       voice: voiceNoteFor(roomKey),
       state: stateText,
-    })
+    }) + recallPart
     : promptFresh;
 
   // 缓存记账：同一会话里档位一换，工具定义那段前缀就变了，上一轮的 prompt cache 接不上。
@@ -1161,12 +1180,15 @@ async function handleBatch(roomKey, msgs) {
       clearTimeout(ackTimer);
       return;
     }
-    // 会话可能被删了或对不上，重开一次，别让这一条石沉大海
-    L('brain', `会话 ${sid} 用不了（${err?.message ?? err}），给 ${roomKey} 重开一个`);
+    // 会话可能被删了或对不上，重开一次，别让这一条石沉大海。
+    // 群聊里不给任何「解释失败」的话术——那边有第三人在场，没人关心她的技术故障。
+    const why1 = String(err?.message ?? err);
+    L('brain', `会话 ${sid} 用不了（${why1}），给 ${roomKey} 重开一个`);
     sessions.clear(roomKey);
+    const retryPrompt = promptFresh + (asGroup ? '' : stallNote(why1));
     try {
       result = await brain.run({
-        prompt: promptFresh,
+        prompt: retryPrompt,
         sessionId: null,
         room: roomKey,
         onEvent,
@@ -1178,7 +1200,7 @@ async function handleBatch(roomKey, msgs) {
         const b = gate.blocked;
         awaiting = {
           roomKey, msgs, last,
-          prompt: promptFresh,
+          prompt: retryPrompt,
           sid: null,
           model: turnModel,
           tool: b.tool, input: b.input, verdict: b.verdict, at: Date.now(),
@@ -1188,9 +1210,37 @@ async function handleBatch(roomKey, msgs) {
         await askApproval(last, b);
         return;
       }
-      L('brain', `重开也失败：${err2?.message ?? err2}`);
-      clearTimeout(ackTimer);
-      return;
+      const why2 = String(err2?.message ?? err2);
+      L('brain', `重开也失败：${why2}`);
+      // 群里两轮都没跑完就到此为止：不解释、不记、不发。
+      if (asGroup) {
+        clearTimeout(ackTimer);
+        return;
+      }
+      // 连着两轮没跑完：这一轮只让她说一句实话，别再动手。
+      try {
+        result = await brain.run({
+          prompt: promptFresh + stallNote(why2, { retry: false }),
+          sessionId: null,
+          room: roomKey,
+          onEvent,
+          profile: turnProfile,
+          model: turnModel,
+        });
+      } catch (err3) {
+        // 三轮都塌了：这次什么也不发。替她说一句「没弄成」是在冒充她，比不吭声更假。
+        // 只把这件事记下来：他当时说的哪句、她停在哪个工具、为什么断——
+        // 少一样，她下次开口就是没头没脑一句「上次卡住了」。
+        const why3 = String(err3?.message ?? err3);
+        L('brain', `收尾也失败，这一轮不发：${why3}`);
+        fails.add(roomKey, {
+          why: why3,
+          said: String(last?.text ?? ''),
+          tools: runningTurns.get(roomKey)?.tools ?? [],
+        });
+        clearTimeout(ackTimer);
+        return;
+      }
     }
   }
 

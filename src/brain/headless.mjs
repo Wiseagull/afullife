@@ -37,6 +37,31 @@ function guessDsh() {
 }
 const GUESS = guessDsh();
 
+/**
+ * 退出码非 0，但这一轮其实成了——final 已经交完，只是收尾（关 MCP server、拆子进程树）崩了。
+ *
+ * 判据是两条独立证据，缺一条就算失败：
+ *   1. final 事件到过。不管里面有没有字——模型什么都没说，也是把话说完了。
+ *   2. stdout 里一个 error 事件都没有。
+ *
+ * 退出码本身不进判据：它记的是"进程怎么退的"，不是"这一轮有没有结果"。
+ *
+ * 为什么要有这条：2026-10-24 光 upkeep/distill 就因此白丢五轮，日志里只剩一句
+ * 「windows-computer-use MCP server 0.2.5 ready」，看不出所以然。2026-10-25 09:14
+ * 体检那次是 7 条事件、最后一条 final、没有 error、stderr 只有 MCP 启动横幅，唯一
+ * 不对的是 final 里一个字都没有——那是模型没说话，不是子进程崩了，按空回复交回去
+ * 比记一次失败诚实。
+ *
+ * 用 sawFinal 而不是"最后一条事件是不是 final"：后者会被 final 之后任何一条事件
+ * （比如带 usage 的 status）顶掉，于是本该放行的又按失败走。
+ */
+export function finishedDespiteExit({ sawFinal = false, errors = [] } = {}) {
+  if (sawFinal !== true) return false;
+  // 脏数据当失败：宁可多记一次失败，也不能拿一个不是数组的东西当作"没有 error"。
+  if (!Array.isArray(errors)) return false;
+  return errors.length === 0;
+}
+
 const DEFAULTS = {
   node: GUESS.node,
   cli: GUESS.cli,
@@ -165,6 +190,8 @@ export class HeadlessBrain {
     const startedAt = Date.now();
     try {
       const result = await this.#spawn(args, String(prompt ?? ''), key, onEvent, extraEnv);
+      // 退出码非 0 但 final 已到的那轮：结果照用，但得在日志里留一行，别让它悄悄过去
+      if (result.exitWarn) this.logger?.('brain', result.exitWarn);
       this.logger?.(
         'brain',
         `headless ${Date.now() - startedAt}ms，${result.text.length} 字，session=${result.sessionId || '?'}`
@@ -209,6 +236,9 @@ export class HeadlessBrain {
       // 只在超时那条错误里出现，正常路径不受影响。
       let lastEventAt = Date.now();
       let lastEventKind = '';
+      // final 到过没有。判「退出码非 0 但这一轮成了」要用它——不能拿 lastEventKind 判，
+      // 那条会被 final 之后任何事件顶掉。
+      let sawFinal = false;
       let eventCount = 0;
       let stdoutBytes = 0;
 
@@ -238,7 +268,10 @@ export class HeadlessBrain {
         lastEventKind = String(ev.type || '?');
         eventCount += 1;
         if (ev.type === 'session' && ev.sessionId) sessionId = String(ev.sessionId);
-        else if (ev.type === 'final' && typeof ev.text === 'string') finalText = ev.text;
+        else if (ev.type === 'final') {
+          sawFinal = true;
+          if (typeof ev.text === 'string') finalText = ev.text;
+        }
         else if (ev.type === 'text' && typeof ev.text === 'string') streamed += ev.text;
         else if (ev.type === 'status' && ev.usage) {
           usageSeen = true;
@@ -282,6 +315,20 @@ export class HeadlessBrain {
         if (buf.trim()) handleLine(buf);
         const text = (finalText || streamed).replace(ANSI, '').trim();
         if (code !== 0) {
+          // 判据在 finishedDespiteExit 上：final 到过 + 一个 error 事件都没有，两条都占才算成。
+          // 退出码仍带出去（exitWarn），由调用方记一笔；缺一条就还按失败走。
+          if (finishedDespiteExit({ sawFinal, errors })) {
+            finish(resolve, {
+              text,
+              sessionId,
+              usage: usageSeen ? usage : null,
+              steps: usageSeen ? steps : 0,
+              exitWarn: text
+                ? `headless 退出码 ${code}（final 已到，按成功处理）`
+                : `headless 退出码 ${code}（final 为空，按空回复处理）`,
+            });
+            return;
+          }
           // 退出码非 0 时以前只报 stderr 的尾巴，可那里多半是宿主自己的启动横幅
           // （「windows-computer-use MCP server 0.2.5 ready」这种），真正的原因在 stdout 的
           // error 事件里，被丢掉了——11 次体检失败因此一直只有一个看不出所以然的 MCP 行。

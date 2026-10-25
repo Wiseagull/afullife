@@ -13,14 +13,16 @@ import { selfLines, agoLabel, refTag, buildBackground } from '../src/memory/cont
 import { SerialQueue } from '../src/body/queue.mjs';
 import { ROOT } from '../src/config.mjs';
 import { handoverPrompt, cleanHandover } from '../src/memory/handover.mjs';
+import { createPersonaGuard } from '../src/memory/persona-guard.mjs';
 import { personaNoteFor } from '../src/body/persona-note.mjs';
 import { EventLog } from '../src/memory/events.mjs';
 import { Sender } from '../src/onebot/sender.mjs';
 import { PokeCooldown } from '../src/body/poke.mjs';
-import { HeadlessBrain } from '../src/brain/headless.mjs';
+import { HeadlessBrain, finishedDespiteExit } from '../src/brain/headless.mjs';
 import { restState, restLine } from '../src/body/rest.mjs';
 import { Doing } from '../src/body/doing.mjs';
 import { dedupe } from '../src/memory/upkeep.mjs';
+import { stallNote, FailBook } from '../src/brain/stall.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -480,6 +482,33 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('没句号就硬切', cleanHandover('甲乙丙丁', { maxChars: 2 }).length <= 2, true);
 }
 
+// ── 人设看门人：文件工具改 self.md 时补一份"改之前"的 ──────
+// 2026-10-24 13:02 「改动日志」整段没了，备份目录里没有那一份——说明是文件工具
+// 直接写的（self.mjs 和面板都会先备份）。看门人只做一件事：变了就存上一版。
+{
+  const dir0 = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-pguard-'));
+  const pfile = path.join(dir0, 'self.md');
+  const bdir = path.join(dir0, 'backups');
+  const sdir = path.join(dir0, 'state');
+  const g = createPersonaGuard({ file: pfile, backupDir: bdir, stateDir: sdir });
+  fs.writeFileSync(pfile, '# A\n\n## 喜欢\n\n- 一\n', 'utf8');
+  check('头一次只见基线不备份', g.tick().seeded, true);
+  check('文件没变不动手', g.tick().changed, false);
+
+  fs.writeFileSync(pfile, '# A\n\n## 讨厌\n\n- 二\n', 'utf8');   // 整份写入，喜欢那节没了
+  const r = g.tick();
+  check('变了会留上一版', Boolean(r.backedUpTo), true);
+  const kept = r.backedUpTo ? fs.readFileSync(r.backedUpTo, 'utf8') : '';
+  check('留下的是变之前那份', kept.includes('- 一'), true);
+  check('留下的不是新那份', kept.includes('- 二'), false);
+
+  fs.writeFileSync(pfile, '# A\n\n## 讨厌\n\n- 三\n', 'utf8');
+  g.tick();
+  const bodies = fs.readdirSync(bdir).map((f) => fs.readFileSync(path.join(bdir, f), 'utf8'));
+  check('备份之间不重复', new Set(bodies).size, bodies.length);
+  fs.rmSync(dir0, { recursive: true, force: true });
+}
+
 // ── headless 超时：要说清卡在哪儿 ────────────────────────
 // 三天里 6 次体检超时，日志只有一句「headless 超时（300000ms）」，
 // 分不出是模型慢、CLI 卡住，还是一条事件都没起来。现在错误里带最后一条事件。
@@ -911,6 +940,76 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('停表：他安静了就继续', s2.paused, false);
   ok('停表：把停掉的那段时间还给她（顺延）', s2.endsAt > s1.endsAt);
   ft.stop('测试结束');
+}
+
+// ── 一轮没跑完 ────────────────────────────────────────────
+// 2026-10-24 21:42 她画图连撞两次超时，整轮作废、一个字都没发出去，
+// 他对着手机等了四十分钟。这几条守的是「失败必须能被说出来」。
+{
+  const why = 'headless 超时（300000ms，最后一条事件 tool_call 在 263s 前，共 20 条 / 9KB）';
+  const again = stallNote(why);
+  ok('没跑完：把卡在哪一步带给她', again.includes('tool_call 在 263s 前'));
+  ok('没跑完：让她自己定重试还是说实话', again.includes('你自己定'));
+  const last = stallNote(why, { retry: false });
+  ok('没跑完：连着两轮之后不让她再动手', last.includes('不要再调用任何工具'));
+  ok('没跑完：两种都从「刚才那一轮没跑完」起头', again.startsWith('【刚才那一轮没跑完】') && last.startsWith('【刚才那一轮没跑完】'));
+  ok('没跑完：原因长得离谱就截断', stallNote('x'.repeat(2000)).length < 500);
+  ok('没跑完：没有原因也不空着', stallNote('').includes('没有原因'));
+
+  ok('没跑完：默认有一句能发出去', stallNote('x').trim().length > 0);
+
+  // 三轮全塌时不替她说话：只记一笔，等她下次开口自己提。
+  const book = new FailBook();
+  check('兜底：没塌过就是空的', book.take('private:1'), '');
+  book.add('private:1', {
+    why: 'headless 超时（300000ms，最后一条事件 tool_call 在 263s 前）',
+    said: '欸～还没画好嘛～',
+    tools: ['sd_server', 'sd_server', 'sd_txt2img', 'sd_txt2img'],
+  });
+  const recalled = book.take('private:1');
+  ok('兜底：下次开口时提得起来', recalled.includes('上一次卡在这儿') && recalled.includes('tool_call 在 263s 前'));
+  ok('兜底：先说清那是件什么事（他当时说的话）', recalled.includes('欸～还没画好嘛～'));
+  ok('兜底：说清她停在哪个工具上', recalled.includes('sd_txt2img'));
+  book.add('private:4', { why: 'X', tools: ['a', 'b', 'c', 'd', 'e'] });
+  ok('兜底：工具只留最后三个', !book.take('private:4').includes('a → '));
+  ok('兜底：交给她自己决定提不提', recalled.includes('不想提也行') && recalled.includes('别当成做完了'));
+  check('兜底：只提醒一次，取过就没了', book.take('private:1'), '');
+  check('兜底：别的房间不受影响', book.take('group:9'), '');
+  book.add('private:3', { why: '只是超时' });
+  ok('兜底：没有上下文也不崩', book.take('private:3').includes('只是超时'));
+  book.add('private:2', { why: '两小时前的' });
+  check('兜底：过了六小时就不翻旧账', book.take('private:2', Date.now() + 7 * 3600_000), '');
+
+  const msrc = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok(
+    '兜底：main 里真的接了三轮',
+    msrc.includes('stallNote(why1)') &&
+      msrc.includes('stallNote(why2, { retry: false })') &&
+      msrc.includes('fails.add(roomKey, {'),
+  );
+  ok('兜底：塌了也不冒充她说话', !msrc.includes('failureLine'));
+  ok(
+    '兜底：群里连失败的话术都不给',
+    msrc.includes("asGroup ? '' : stallNote(why1)") && msrc.includes("asGroup ? '' : fails.take(roomKey)"),
+  );
+  ok('兜底：群里两轮没跑完就到此为止', /if \(asGroup\) \{\s*clearTimeout\(ackTimer\);\s*return;/.test(msrc));
+}
+
+// ── 退出码非 0 但这一轮成了 ────────────────────────────────
+// 2026-10-24 光 upkeep/distill 就因此白丢五轮；2026-10-25 09:14 体检那次 final 里一个字
+// 都没有，也被当成崩了。判据必须是两条独立证据，缺一条就算失败。
+{
+  ok('退出码：final 到过、没有 error → 算成', finishedDespiteExit({ sawFinal: true, errors: [] }));
+  ok('退出码：errors 没传也算没有 error', finishedDespiteExit({ sawFinal: true }));
+  ok('退出码：有 error 就不算成', !finishedDespiteExit({ sawFinal: true, errors: ['boom'] }));
+  ok('退出码：final 根本没到 → 不算成', !finishedDespiteExit({ sawFinal: false, errors: [] }));
+  ok('退出码：没 final 又有 error → 不算成', !finishedDespiteExit({ sawFinal: false, errors: ['boom'] }));
+  ok('退出码：什么都不给 → 不算成，也不崩', !finishedDespiteExit());
+  ok('退出码：errors 是个脏东西 → 当失败，别当没有 error', !finishedDespiteExit({ sawFinal: true, errors: 'boom' }));
+
+  const hsrc = fs.readFileSync(path.join(ROOT, 'src/brain/headless.mjs'), 'utf8');
+  ok('退出码：不用「最后一条事件是不是 final」判（会被后续事件顶掉）', !hsrc.includes("lastEventKind === 'final'"));
+  ok('退出码：看到 final 就记一笔，后面来什么都顶不掉', hsrc.includes('sawFinal = true'));
 }
 
 // ── 结果 ────────────────────────────────────────────────

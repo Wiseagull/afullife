@@ -13,10 +13,13 @@ import path from 'node:path';
 import { ROOT } from '../src/config.mjs';
 
 const FILE = path.join(ROOT, 'persona', 'self.md');
+// 日志不放 self.md 里了 —— 那本是「我是谁」，日志一直往里长就成了流水账。
+// 2026-10-24 先生提的，搬到小本本，self.md 末尾只留一行指路。
+const LOG_FILE = path.join(ROOT, 'notebook', 'memories', 'self-改动日志.md');
 const BACKUP_DIR = path.join(ROOT, 'data', 'persona-backups');
 
 function read() {
-  try { return fs.readFileSync(FILE, 'utf8'); } catch { return '# 我自己写的部分\n\n## 喜欢\n\n## 讨厌\n\n## 改动日志\n'; }
+  try { return fs.readFileSync(FILE, 'utf8'); } catch { return '# 我自己写的部分\n\n## 喜欢\n\n## 讨厌\n'; }
 }
 
 function backup(text) {
@@ -72,8 +75,14 @@ if (cmd === 'log') {
   const text = rest.join(' ').trim();
   if (!text) { console.error('用法: self.mjs log <一句话>'); process.exit(1); }
   const day = new Date().toISOString().slice(0, 10);
-  save(addUnder(read(), '改动日志', `- ${day} ${text}`));
-  console.log(`记进改动日志：${text}`);
+  fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+  let old = '';
+  try { old = fs.readFileSync(LOG_FILE, 'utf8'); } catch {
+    old = '# self.md 改动日志\n\n> 从那本里搬出来的，正文留在 persona/self.md。\n\n';
+  }
+  const body = old.replace(/\s*$/, '') + `\n- ${day} ${text}\n`;
+  fs.writeFileSync(LOG_FILE, body, 'utf8');
+  console.log(`记进改动日志（notebook/memories/self-改动日志.md）：${text}`);
   process.exit(0);
 }
 
