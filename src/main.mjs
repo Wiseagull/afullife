@@ -13,10 +13,10 @@ import { SelfDrafts } from './memory/selfdrafts.mjs';
 import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mjs';
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
-import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentImagesHint, videoHint, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
+import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentImagesHint, videoHint, renderStickers, setHints, ruleOf, LIGHT_HINT } from './body/prompt.mjs';
 import { loadStore, samplesFor, voiceBlock } from './body/voice.mjs';
 import { personaNoteFor } from './body/persona-note.mjs';
-import { judgeFull, chatRules } from './body/rules.mjs';
+import { judgeFull, chatRules, wantsFullTools } from './body/rules.mjs';
 import { setWorkspaceRoots, underWorkspace, imageReadScope } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
@@ -1038,7 +1038,7 @@ async function handleBatch(roomKey, msgs) {
   // 只在他俩私聊里提——群里有第三人在场，翻这种旧账既没意义，也轮不到别人知道。
   const recall = asGroup ? '' : fails.take(roomKey);
   const recallPart = recall ? `\n\n${recall}` : '';
-  const promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey), state: stateText }) + recallPart;
+  let promptFresh = buildPrompt({ roomKey, messages: msgs, recent, background, isGroup: asGroup, selfNames: names, stickerLine, personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }), extra: draftsLine, rules: rulesText, usageLine: usageLineFor(roomKey), voice: voiceNoteFor(roomKey), state: stateText }) + recallPart;
   let prompt = sid
     ? buildFollowup(msgs, {
       delta, isGroup: asGroup, addressed, selfNames: names, stickerLine,
@@ -1049,6 +1049,15 @@ async function handleBatch(roomKey, msgs) {
       state: stateText,
     }) + recallPart
     : promptFresh;
+
+  // 轻装这一轮：先告诉她工具不全，需要就自己开口换（回话后由 wantsFullTools 认）。
+  // promptNoHint 留着给她"要全套"时重跑用——那句提示在全套那一轮里没有意义。
+  const promptNoHint = prompt;
+  if (turnProfile) {
+    const hint = String.fromCharCode(10, 10) + LIGHT_HINT;
+    promptFresh += hint;
+    prompt += hint;
+  }
 
   // 缓存记账：同一会话里档位一换，工具定义那段前缀就变了，上一轮的 prompt cache 接不上。
   // 这里只记日志、不改行为——先看清换挡有多勤，再决定值不值得把档位固定住。
@@ -1162,6 +1171,30 @@ async function handleBatch(roomKey, msgs) {
     }
   }
   result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, profile: turnProfile, model: turnModel });
+
+  // 轻装那一轮，她自己说要全套工具：换档重跑一次。
+  // 她比正则准——与其猜「他是不是要动手」，不如让她自己说一声。
+  if (turnProfile && result && wantsFullTools(result.text)) {
+    L('brain', '她自己要全套工具，换档重跑这一轮');
+    try {
+      const full = await brain.run({
+        prompt: promptNoHint,
+        sessionId: sid,
+        room: roomKey,
+        onEvent: onEventAcked,
+        profile: null,
+        model: turnModel,
+      });
+      if (full && String(full.text || '').trim()) result = full;
+    } catch (e) {
+      L('brain', `换档重跑没成，还是用原来那一轮：${e?.message ?? e}`);
+    }
+  }
+  // 那句标记是给她自己看的，别原样发给先生。
+  if (result && typeof result.text === 'string') {
+    const cleaned = result.text.replace(/<full\s*\/?>\s*/gi, '').trim();
+    if (cleaned !== result.text) result.text = cleaned;
+  }
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       const b = gate.blocked;

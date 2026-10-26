@@ -43,15 +43,48 @@ function dirSize(dir) {
   return total;
 }
 
+// 索引层：只许指路，不许生产内容。
+// 每一条都是原文的一截（截断，不改写）+ 指回原文的门牌 file:line。
+// 拿不准的地方宁可留"（标题）"，也不要概括——概括过的门牌会让人以为找过了。
+// 放在这上面，是因为 write 也要用它（写在下面会踩 const 的 TDZ）。
+const KEY_MAX = 46;
+
+function keyOf(text) {
+  let s = String(text).replace(/\s+/g, ' ').trim();
+  // 有的条目开头连着好几个时间戳，剥掉，别让它占了正文的位置
+  for (let i = 0; i < 3; i += 1) {
+    const m = s.match(/^\d{1,2}:\d{2}(\s*[-~—]\s*\d{1,2}:\d{2})?\s+/);
+    if (!m) break;
+    s = s.slice(m[0].length);
+  }
+  // 只取第一句：逗号留着，句号/冒号/分号之后就是另一件事了
+  const cut = s.split(/[。；]/)[0];
+  const one = (cut || s).trim();
+  // 按码点切，不按 UTF-16 码元切：正好切在 emoji 的代理对中间会切出半个字
+  const cps = Array.from(one);
+  return cps.length > KEY_MAX ? `${cps.slice(0, KEY_MAX).join('')}…` : one;
+}
+
 const args = process.argv.slice(2);
 const cmd = args[0];
-const flags = Object.fromEntries(
-  args.filter((a) => a.startsWith('--')).map((a) => {
-    const [k, v] = a.slice(2).split('=');
-    return [k, v ?? true];
-  }),
-);
-let words = args.slice(1).filter((a) => !a.startsWith('--')).join(' ').trim();
+// 只认 --key=value 的时候，手写成 `--to notes/x.md` 会静默出事：
+// --to 变成 true、文件名当正文，整段笔记落进当天那一页（2026-10-25 23:44 就这样丢了一条）。
+// 现在两种写法都认；--to 后面没跟值就直接报错，别猜。
+const flags = {};
+const rest = [];
+for (let i = 1; i < args.length; i += 1) {
+  const a = args[i];
+  if (!a.startsWith('--')) { rest.push(a); continue; }
+  const body = a.slice(2);
+  const eq = body.indexOf('=');
+  if (eq >= 0) { flags[body.slice(0, eq)] = body.slice(eq + 1); continue; }
+  const next = args[i + 1];
+  const wantsValue = ['to', 'file', 'days', 'n'].includes(body);
+  if (wantsValue && next && !next.startsWith('--')) { flags[body] = next; i += 1; continue; }
+  if (wantsValue) { console.error(`--${body} 后面要跟一个值（写成 --${body}=xxx 也行）`); process.exit(2); }
+  flags[body] = true;
+}
+let words = rest.join(' ').trim();
 
 fs.mkdirSync(path.join(DIR, 'notes'), { recursive: true });
 fs.mkdirSync(path.join(DIR, 'memories'), { recursive: true });
@@ -65,7 +98,7 @@ if (!cmd || cmd === 'help') {
   read --file=notes/2026-10-21.md     读某个文件
   find <词>                全文找
   stat                     多大、有几页
-  index                    重建 INDEX.md（每条一行，带 file:line 门牌）`);
+  index                    重建 INDEX.md（每条一行，带 file:line 门牌；write 时自动重建）`);
   process.exit(0);
 }
 
@@ -85,9 +118,18 @@ if (cmd === 'write') {
   const file = path.join(DIR, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const fresh = !fs.existsSync(file);
-  const head = fresh ? `# ${today()}\n\n` : '';
+  // 只有「今天这一页」才盖日期标题。--to 建的是主题文件（memories/xxx.md），
+  // 给它盖 `# 2026-10-26` 会让标题变成建它的那天，索引里也读成「〔2026-10-26〕」。
+  const head = fresh && !flags.to ? `# ${today()}\n\n` : '';
   fs.appendFileSync(file, `${head}- ${now()} ${words}\n`, 'utf8');
   console.log(`记进 ${rel}`);
+  // 索引跟着重建：以前只靠手动 index，10-26 那次就停过二十来条没人发现。
+  // 失败只提醒，不拦记账——记下来永远比索引整齐要紧。
+  try {
+    rebuildIndex({ quiet: true });
+  } catch (e) {
+    console.error(`索引没重建成功（记的东西已经写进去了）：${e?.message ?? e}`);
+  }
   process.exit(0);
 }
 
@@ -143,27 +185,7 @@ if (cmd === 'stat') {
 }
 
 // 索引层：只许指路，不许生产内容。
-// 每一条都是原文的一截（截断，不改写）+ 指回原文的门牌 file:line。
-// 拿不准的地方宁可留"（标题）"，也不要概括——概括过的门牌会让人以为找过了。
-const KEY_MAX = 46;
-
-function keyOf(text) {
-  let s = String(text).replace(/\s+/g, ' ').trim();
-  // 有的条目开头连着好几个时间戳，剥掉，别让它占了正文的位置
-  for (let i = 0; i < 3; i += 1) {
-    const m = s.match(/^\d{1,2}:\d{2}(\s*[-~—]\s*\d{1,2}:\d{2})?\s+/);
-    if (!m) break;
-    s = s.slice(m[0].length);
-  }
-  // 只取第一句：逗号留着，句号/冒号/分号之后就是另一件事了
-  const cut = s.split(/[。；]/)[0];
-  const one = (cut || s).trim();
-  // 按码点切，不按 UTF-16 码元切：正好切在 emoji 的代理对中间会切出半个字
-  const cps = Array.from(one);
-  return cps.length > KEY_MAX ? `${cps.slice(0, KEY_MAX).join('')}…` : one;
-}
-
-if (cmd === 'index') {
+function rebuildIndex(opts = {}) {
   const skip = new Set(['README.md', 'INDEX.md']);
   const files = walk(DIR)
     .filter((f) => /\.md$/i.test(f) && !skip.has(path.basename(f)))
@@ -231,7 +253,13 @@ if (cmd === 'index') {
 
   const file = path.join(DIR, 'INDEX.md');
   fs.writeFileSync(file, out.join('\n'), 'utf8');
-  console.log(`索引重建：${total} 条 / ${groups.length} 个文件 → ${path.relative(DIR, file)}`);
+  // quiet 给 write 用：记账不该在终端里多刷一行，但索引得跟着新
+  if (!opts.quiet) console.log(`索引重建：${total} 条 / ${groups.length} 个文件 → ${path.relative(DIR, file)}`);
+  return { total, files: groups.length, file };
+}
+
+if (cmd === 'index') {
+  rebuildIndex();
   process.exit(0);
 }
 

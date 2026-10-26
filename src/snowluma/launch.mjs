@@ -25,7 +25,7 @@ export function ensureSnowLuma(opts = {}) {
   return inFlight;
 }
 
-async function boot({ cfg, logger = () => {}, timeoutMs = 45000 } = {}) {
+async function boot({ cfg, logger = () => {}, timeoutMs = 60000 } = {}) {
   const wsPort = portOf(cfg?.onebot?.wsUrl);
   const httpPort = portOf(cfg?.onebot?.httpUrl, 3000);
 
@@ -98,7 +98,12 @@ async function boot({ cfg, logger = () => {}, timeoutMs = 45000 } = {}) {
 /** 等 OneBot 两个端口开出来（QQ 登录可能要等一会儿） */
 async function waitPorts({ wsPort, httpPort, timeoutMs, logger, dir, started = false }) {
   const deadline = Date.now() + timeoutMs;
+  let webuiUp = false;
   while (Date.now() < deadline) {
+    // 5099/5100 是它自己的网页。这个通了就说明进程活着，只是 OneBot 还没开。
+    if (!webuiUp) {
+      webuiUp = (await isPortOpen(5099, '127.0.0.1', 300)) || (await isPortOpen(5100, '127.0.0.1', 300));
+    }
     if (await isPortOpen(wsPort)) {
       await sleep(400);
       if (await isPortOpen(httpPort)) {
@@ -107,6 +112,12 @@ async function waitPorts({ wsPort, httpPort, timeoutMs, logger, dir, started = f
       }
     }
     await sleep(700);
+  }
+  // 进程活着就算起了：OneBot 端口没开多半只是 QQ 还没登录，再等也不会更早。
+  // 报「起来了，但没登录」比报「唤醒失败」实在——后者会让人以为白点了。
+  if (webuiUp) {
+    logger('snowluma', '进程起来了，但 OneBot 端口还没开——多半 QQ 还没登录');
+    return { ok: true, started, dir, note: '起来了，但 QQ 还没登录（OneBot 端口没开）' };
   }
   return {
     ok: false,

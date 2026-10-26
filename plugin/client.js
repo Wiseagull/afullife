@@ -1454,11 +1454,11 @@ window.__ModuleLoader__.load({
 
       const wake = async () => {
         setBusy(true);
-        setNote('正在唤醒…');
+        setNote('正在唤醒…（第一次要等它登录，最长一分钟）');
         try {
           const r = await api('/api/snowluma/up', { method: 'POST' });
           if (r && r.ok) {
-            setNote(r.started ? '起来了' : '本来就在跑');
+            setNote(r.note || (r.started ? '起来了' : '本来就在跑'));
             // 地址以后端为准：SnowLuma 抢不到 5099 时会退到 5100
             if (r.url) window.open(r.url, '_blank', 'noopener');
           } else {

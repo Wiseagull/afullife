@@ -6,7 +6,8 @@ import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
 import { FreeTime, openingMood, draftLines, shouldYield, stripMarks } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
-import { buildPrompt, buildTriggerLines, videoHint } from '../src/body/prompt.mjs';
+import { buildPrompt, buildTriggerLines, videoHint, LIGHT_HINT } from '../src/body/prompt.mjs';
+import { wantsFullTools } from '../src/body/rules.mjs';
 import { sniffImage, sniffVideo } from '../src/media/sniff.mjs';
 import { gifFrameCount, isAnimatedGif } from '../src/media/gif.mjs';
 import { selfLines, agoLabel, refTag, buildBackground } from '../src/memory/context.mjs';
@@ -1030,8 +1031,24 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
 // 读自己的记忆像读别人的档案。改成第一人称视角之后，注入那边一个字都不用动。
 {
   const dsrc = fs.readFileSync(path.join(ROOT, 'src/memory/distill.mjs'), 'utf8');
-  ok('记忆：要写成"你"的视角', dsrc.includes('"你"的视角'));
+  ok('记忆：要写成"我"的视角（本鲸也行）', dsrc.includes('"我"的视角'));
   ok('记忆：不许再要求第三人称', !dsrc.includes('第三人称'));
+}
+
+// ── 她自己决定这轮要不要整套工具 ────────────────────────────
+// 2026-10-26：他问「能不能让她自己判断这轮该不该调用完整工具集」。
+// 判据不能靠正则猜（那天她说「这轮没看到这个工具」，正则一条都没命中），
+// 于是改成：轻装那轮告诉她工具不全，需要就自己说一声，回话后换档重跑。
+{
+  ok('换档：认得出「我要用全套工具」', wantsFullTools('我要用全套工具'));
+  ok('换档：认得出她说缺工具那段话', wantsFullTools('这轮没看到这个工具，我要用全套工具'));
+  ok('换档：认得出 <full/> 标记', wantsFullTools('<full/>'));
+  ok('换档：平时说话不误判', !wantsFullTools('我给你画吧，等我一下'));
+  ok('换档：只是问「全套工具是什么」不算要换', !wantsFullTools('全套工具是什么'));
+  ok('换档：轻装那一轮要告诉她工具不全', String(LIGHT_HINT || '').includes('我要用全套工具'));
+  const msrc2 = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok('换档：说出口之后就真的重跑一次', msrc2.includes('换档重跑这一轮'));
+  ok('换档：重跑用的是不带提示的那份提示词', msrc2.includes('promptNoHint'));
 }
 
 // ── 结果 ────────────────────────────────────────────────

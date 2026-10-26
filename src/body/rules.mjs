@@ -67,6 +67,18 @@ const OBJECTS = [
  * @param {boolean} [o.toolsJustUsed] 这个房间刚动过手（干活是连续的）
  * @returns {{full: boolean, reason: string}}
  */
+/**
+ * 她在轻装那一轮里自己要求换全套工具。
+ *
+ * judgeFull 那套是在猜「他要不要动手」；这个不是猜——是她自己说的。
+ * 她说「这轮没看到这个工具」，比任何启发式都准。
+ */
+export function wantsFullTools(text) {
+  const s = String(text || '');
+  if (/<full\s*\/?>/i.test(s)) return true;
+  return /(我要|我想|我得|需要)(用)?全套工具/.test(s);
+}
+
 export function judgeFull({ isGroup = false, messages = [], addressed = false, toolsJustUsed = false } = {}) {
   const list = Array.isArray(messages) ? messages : [];
 
