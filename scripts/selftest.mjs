@@ -6,8 +6,8 @@ import { toPlain, splitMessage } from '../src/util/text.mjs';
 import { StickerLibrary } from '../src/stickers/library.mjs';
 import { FreeTime, openingMood, draftLines, shouldYield, stripMarks } from '../src/body/freetime.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
-import { buildPrompt, buildTriggerLines, videoHint, LIGHT_HINT } from '../src/body/prompt.mjs';
-import { wantsFullTools } from '../src/body/rules.mjs';
+import { buildPrompt, buildTriggerLines, videoHint } from '../src/body/prompt.mjs';
+
 import { sniffImage, sniffVideo } from '../src/media/sniff.mjs';
 import { gifFrameCount, isAnimatedGif } from '../src/media/gif.mjs';
 import { selfLines, agoLabel, refTag, buildBackground } from '../src/memory/context.mjs';
@@ -537,7 +537,7 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
       "setTimeout(() => {}, 60000);",
     ].join('\n'), 'utf8');
     process.env.DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'selftest-key';
-    const brain = new HeadlessBrain({ node: process.execPath, cli: fake, workspace: dir, timeoutMs: 1200 });
+    const brain = new HeadlessBrain({ node: process.execPath, cli: fake, workspace: dir, timeoutMs: 1200, graceMs: 1 });
     let msg = '';
     try {
       await brain.run({ prompt: '随便' });
@@ -694,9 +694,15 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('主人的群里三份都带', ownGroup.includes('CORE-内容') && ownGroup.includes('GROUP-内容') && ownGroup.includes('SELF-内容'));
 
   const other = personaNoteFor({ isOwner: false, isGroup: true, dir });
-  ok('外人看不到核心人设和她自己那份', !other.includes('CORE-内容') && !other.includes('SELF-内容'));
-  ok('外人只拿对外那份群聊手册', other.includes('【对外的人设') && other.includes('GROUP-内容'));
+  // 2026-10-26 改回来：原来非主人整段摘掉 core/self，群里只要有个群友插过话，
+  // 她的人设就只剩一份「怎么跟陌生人说话」的手册。core/self 现在永远在。
+  ok('外人也带着核心人设（她始终是她自己）', other.includes('CORE-内容') && other.includes('SELF-内容'));
+  ok('外人也带群聊手册', other.includes('GROUP-内容'));
   ok('外人不被叫作先生', other.includes('不是先生本人'));
+  const otherPrivate = personaNoteFor({ isOwner: false, isGroup: false, dir });
+  ok('私聊里的外人也带核心人设', otherPrivate.includes('CORE-内容') && otherPrivate.includes('SELF-内容'));
+  ok('私聊里的外人也带群聊手册（收敛用）', otherPrivate.includes('GROUP-内容'));
+  ok('私聊里的外人不被叫作先生', otherPrivate.includes('不是先生本人'));
 
   const logged = [];
   personaNoteFor({ dir, log: (m) => logged.push(m) });
@@ -1035,20 +1041,16 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('记忆：不许再要求第三人称', !dsrc.includes('第三人称'));
 }
 
-// ── 她自己决定这轮要不要整套工具 ────────────────────────────
-// 2026-10-26：他问「能不能让她自己判断这轮该不该调用完整工具集」。
-// 判据不能靠正则猜（那天她说「这轮没看到这个工具」，正则一条都没命中），
-// 于是改成：轻装那轮告诉她工具不全，需要就自己说一声，回话后换档重跑。
+// ── 工具恒定全套 ────────────────────────────────────────────
+// 2026-10-26：这一块原来测的是「她自己说要全套工具 → 换档重跑」。
+// 实测换档洗缓存，一次多烧 137000 token，而全量和轻装每步只差 9548，
+// 判据还是正则。整条砍了——她永远拿全套，不再需要「要工具」这句话。
 {
-  ok('换档：认得出「我要用全套工具」', wantsFullTools('我要用全套工具'));
-  ok('换档：认得出她说缺工具那段话', wantsFullTools('这轮没看到这个工具，我要用全套工具'));
-  ok('换档：认得出 <full/> 标记', wantsFullTools('<full/>'));
-  ok('换档：平时说话不误判', !wantsFullTools('我给你画吧，等我一下'));
-  ok('换档：只是问「全套工具是什么」不算要换', !wantsFullTools('全套工具是什么'));
-  ok('换档：轻装那一轮要告诉她工具不全', String(LIGHT_HINT || '').includes('我要用全套工具'));
   const msrc2 = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
-  ok('换档：说出口之后就真的重跑一次', msrc2.includes('换档重跑这一轮'));
-  ok('换档：重跑用的是不带提示的那份提示词', msrc2.includes('promptNoHint'));
+  ok('工具：不再按闲聊降档', !msrc2.includes('turnProfile'));
+  ok('工具：不再有「要全套工具」的解析', !msrc2.includes('wantsFullTools'));
+  ok('工具：三处都落到默认 profile（全量）', !msrc2.includes('chatProfile'));
+  ok('工具：规程也恒定全套', msrc2.includes('const rulesText = ruleOf(asGroup);'));
 }
 
 // ── 结果 ────────────────────────────────────────────────

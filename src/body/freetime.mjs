@@ -33,6 +33,12 @@ export function stripMarks(text) {
     .trim();
 }
 
+// 撞到一拍的上限时，事件还在多久之内算「她还在干活」而不是「卡死了」。
+// 和 headless 那边的宽限判据同一个数：那边宽限过的拍子回来时可能是这一种。
+const LONG_BEAT_FRESH_MS = 90_000;
+// 连着这么多次撞上限，这一段就别再续了：同一件事连撞四回不是坚持，是没刹住。
+const LONG_BEAT_LIMIT = 4;
+
 function fmtMs(ms) {
   const m = Math.max(0, Math.round(ms / 60000));
   return `${m} 分钟`;
@@ -137,6 +143,7 @@ export class FreeTime {
   #messages = 0;
   #opening = false;
   #errors = 0;
+  #longBeats = 0;      // 撞到一拍上限、但还在干活的次数（不算故障，见 #tick）
   #openTries = 0;
   #last = '';
   #sid = null;
@@ -279,13 +286,32 @@ export class FreeTime {
     // 连"在呢"都垫不出来。想事情不打扰任何人，不该让人等。
     // 会不会撞车？这一拍回来要发之前会再看一眼房间（#yieldBecause），
     // 他在这拍里说过话就咽回去，所以并发想、串行说，不会两个声音。
-    this.#beat().then(() => { this.#errors = 0; }).catch((e) => {
-      this.#log('free', `这一拍出错：${e?.message ?? e}`);
+    this.#beat().then(() => { this.#errors = 0; this.#longBeats = 0; }).catch((e) => {
+      const msg = String(e?.message ?? e);
+      // 撞到一拍的上限，但事件几十秒内还在流：她是在干活，不是卡死。
+      //
+      // 2026-10-26 16:05 / 16:10 / 16:16 连着三次，三次的「最后一条事件」都在 2-6 秒前，
+      // 每一拍都在画、在量——300 秒不够一件活儿。旧逻辑把三次都记成故障，于是
+      // ①整段提前收了（933 秒就结束，后面那半小时没了）②还给他发了句「这一段好像有点问题」，
+      // 其实什么都没坏。长拍不算故障，只算这一拍太长：接着做，但要她收尾。
+      const longBeat = e?.code === 'HEADLESS_TIMEOUT'
+        && Number.isFinite(e?.stallMs) && e.stallMs <= LONG_BEAT_FRESH_MS;
+      if (longBeat) {
+        this.#longBeats += 1;
+        this.#log('free', `这一拍撞到时间上限，还在干活（${msg}）第 ${this.#longBeats} 次`);
+        if (this.#longBeats >= LONG_BEAT_LIMIT) {
+          this.#longBeats = 0;
+          return this.#finish('拍子太长');
+        }
+        this.#last = '你上一拍撞到时间上限了（还在做，不是出错，但一拍不能无限长）——这一拍把手头那件收个尾，别开新线。';
+        return this.#schedule(3000);
+      }
+      this.#log('free', `这一拍出错：${msg}`);
       this.#errors = (this.#errors || 0) + 1;
       // 连着出错说明不是偶发：别一路空转，说一声、停下来
       if (this.#errors >= 3) {
         this.#errors = 0;
-        this.#send('这一段好像有点问题，我先停下：' + String(e?.message ?? e).slice(0, 120)).catch(() => {});
+        this.#send('这一段好像有点问题，我先停下：' + msg.slice(0, 120)).catch(() => {});
         return this.#finish('连续出错');
       }
       this.#schedule(15000);

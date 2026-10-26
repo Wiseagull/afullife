@@ -1482,13 +1482,14 @@ window.__ModuleLoader__.load({
     function Panel() {
       const [tab, setTab] = useState('group');
       const [cfg, setCfg] = useState(null);
+      const [ver, setVer] = useState('');
       const [err, setErr] = useState('');
       const [msg, setMsg] = useState('');
       const [busyRestart, setBusyRestart] = useState(false);
 
       useEffect(() => {
         api('/api/config')
-          .then((r) => setCfg(r.config))
+          .then((r) => { setCfg(r.config); setVer(r.version || ''); })
           .catch((e) => setErr(e.message));
       }, []);
 
@@ -1518,6 +1519,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: S.wrap },
         h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10 } },
           h('div', { style: { fontSize: 15, fontWeight: 600 } }, 'AFL 通道'),
+          ver ? h('div', { style: Object.assign({}, S.tiny, { opacity: 0.7 }) }, `v${ver}`) : null,
           h('div', { style: S.tiny }, 'QQ 这边怎么说话、记得什么'),
           h(SnowLumaButton, { style: { marginLeft: 'auto' } }),
           h('button', {

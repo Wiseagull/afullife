@@ -66,8 +66,6 @@ const DEFAULTS = {
   node: GUESS.node,
   cli: GUESS.cli,
   profile: 'headless',
-  // 空 = 不换，始终用上面那套；填了就是「闲聊用的轻装 profile」
-  chatProfile: '',
   // 用哪个模型：{ provider, model }。空就用 profile 自己的默认（agent-default-model）。
   // 选了就写一份 patch 用 --patch 叠上去，见 src/brain/model.mjs 顶上那段。
   model: null,
@@ -90,6 +88,15 @@ export function dshDefaults() {
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-9;]*m/g;
+
+// 撞到墙钟上限时，如果这一轮几十秒内还在出事件，就再给一小段宽限。
+//
+// 起因是 2026-10-26 16:16:00 那一拍：笔记 16:15:59 刚落盘，差一秒收尾，
+// 却被按「超时」整轮扔掉。撞墙≠卡死，判据得分开：还在出事件说明它在干活，
+// 卡死的（事件早停了）一秒都不宽限。宽限只给一次，不然墙就是假的。
+const TIMEOUT_GRACE_MS = 60_000;
+// 多久之内有过事件算「还在动」。比宽限还长就没意义了，所以同一个数。
+const FRESH_MS = TIMEOUT_GRACE_MS;
 
 /** 连子进程一起杀：Windows 下  只杀爹。 */
 function killTree(child) {
@@ -242,22 +249,41 @@ export class HeadlessBrain {
       let eventCount = 0;
       let stdoutBytes = 0;
 
+      let timer = null;
+      let graced = false;
       const finish = (fn, value) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         fn(value);
       };
 
-      const timer = setTimeout(() => {
+      // 宽限可以配：自测要把它设小，不然一个 1.2 秒的超时会被宽限拖到一分钟，
+      // 假 cli 自己先退了，超时根本没发生。
+      const graceMs = Number(this.cfg.graceMs ?? TIMEOUT_GRACE_MS);
+      const deadline = () => {
+        const stall = Date.now() - lastEventAt;
+        // 还在出事件：再给一次宽限，到点照杀。只给一次——不然上限就不是上限了。
+        if (graceMs > 0 && !graced && eventCount > 0 && stall <= FRESH_MS) {
+          graced = true;
+          this.logger?.('brain', `这一轮撞到 ${Math.round(this.cfg.timeoutMs / 1000)}s 上限，但最后一条事件只在 ${Math.round(stall / 1000)}s 前（还在干活，不是卡死），再给 ${Math.round(graceMs / 1000)}s 收尾`);
+          timer = setTimeout(deadline, graceMs);
+          return;
+        }
         // 连子进程树一起掐：它可能拉起了 SD 这种大程序，只杀爹会剩孤儿占着端口
         killTree(child);
-        const stall = Math.round((Date.now() - lastEventAt) / 1000);
         const where = lastEventKind
-          ? `最后一条事件 ${lastEventKind} 在 ${stall}s 前，共 ${eventCount} 条 / ${Math.round(stdoutBytes / 1024)}KB`
+          ? `最后一条事件 ${lastEventKind} 在 ${Math.round(stall / 1000)}s 前，共 ${eventCount} 条 / ${Math.round(stdoutBytes / 1024)}KB`
           : `一条事件都没收到（0KB），卡在起进程或读 prompt 那一步`;
-        finish(reject, new Error(`headless 超时（${this.cfg.timeoutMs}ms，${where}）`));
-      }, this.cfg.timeoutMs);
+        const e = new Error(`headless 超时（${this.cfg.timeoutMs}ms，${where}）`);
+        // 让调用方凭字段分清「卡死了」和「一直在干活、只是这一拍太长」，别去解析文案。
+        e.code = 'HEADLESS_TIMEOUT';
+        e.stallMs = stall;
+        e.eventCount = eventCount;
+        finish(reject, e);
+      };
+
+      timer = setTimeout(deadline, this.cfg.timeoutMs);
 
       const handleLine = (line) => {
         const s = line.trim();

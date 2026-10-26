@@ -13,10 +13,9 @@ import { SelfDrafts } from './memory/selfdrafts.mjs';
 import { normalizeEvent, renderTranscript, segmentsToText } from './body/room.mjs';
 import { isPoke, pokedMe, pokeRoom, decidePoke, PokeCooldown } from './body/poke.mjs';
 import { renderForwardNodes, loadForwardNodes } from './body/forward.mjs';
-import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentImagesHint, videoHint, renderStickers, setHints, ruleOf, LIGHT_HINT } from './body/prompt.mjs';
+import { buildPrompt, buildFollowup, NOPOWER_HINT, NOPOWER_IMAGE_HINT, recentImagesHint, videoHint, renderStickers, setHints, ruleOf } from './body/prompt.mjs';
 import { loadStore, samplesFor, voiceBlock } from './body/voice.mjs';
 import { personaNoteFor } from './body/persona-note.mjs';
-import { judgeFull, chatRules, wantsFullTools } from './body/rules.mjs';
 import { setWorkspaceRoots, underWorkspace, imageReadScope } from './safety/rules.mjs';
 import { SessionMap } from './memory/sessions.mjs';
 import { RoomNames } from './onebot/roomnames.mjs';
@@ -134,9 +133,6 @@ const FG = 10;
 const pokeCooldown = new PokeCooldown(cfg.poke?.cooldownMs ?? 30000);
 const brain = createBrain(cfg, L);
 const sessions = new SessionMap({ file: path.join(cfg.dataDir, 'sessions.json') });
-// 每个房间上一轮用的是哪个档位（轻装 / 全量）：同一会话里换档，工具定义那段前缀就变了，
-// 上一轮的 prompt cache 接不上。只记下来，好从日志里看出换得有多勤（不改行为）。
-const lastProfile = new Map();
 // 哪个房间上一轮三轮全塌了：不发任何东西出去，等她下次开口时把这件事放回她眼前。
 const fails = new FailBook();
 const roomNames = new RoomNames({ file: path.join(cfg.dataDir, 'rooms.json') });
@@ -362,9 +358,6 @@ const decideBrain = withModel(worker, slotModel('decideModel'));
 const visionBrain = withModel(worker, slotModel('visionModel'));
 
 let lastSeenTs = Date.now();
-// 每个房间「上一轮动过手没有」。只认上一轮——用 20 分钟窗口会让一次 web_fetch
-// 把后面半小时全判成干活，闲聊就永远回到精简体。
-const lastRoundTouched = new Map();
 // 拼给提示词的那一句「今天花了多少」：全局 + 这个房间
 function usageLineFor(roomKey) {
   try {
@@ -425,7 +418,6 @@ async function asideWhileBusy(roomKey, msg) {
     const r = await brain.run({
       prompt,
       sessionId: null,                                       // 另起一个，别碰她手上那个会话
-      profile: cfg.brain?.headless?.chatProfile || null,
     });
     const text = String(r?.text ?? '').trim();
     if (!text || /^(pass|\[silent\])$/i.test(text)) return null;
@@ -959,7 +951,6 @@ async function handleBatch(roomKey, msgs) {
         logger: L,
         includeInner: hcfg.inner !== false,
         maxChars: Number(hcfg.maxChars) || 1200,
-        profile: cfg.brain?.headless?.chatProfile || null,
       }).catch((e) => L('memory', `交接没写成：${e.message}`)), 'handover');
     }
   }
@@ -1006,10 +997,6 @@ async function handleBatch(roomKey, msgs) {
   }
   lastSelfMtime = selfMtime;
 
-  // 上一轮她动过手吗？取完就把这一轮清零，等这一轮真动手再置位
-  const touchedPrevRound = lastRoundTouched.get(roomKey) === true;
-  lastRoundTouched.set(roomKey, false);
-
   const draftsLine = selfDrafts.render(3);
   // 谁是"先生"，只看这一批是谁说的——人设也跟着分：
   // 主人说话 → 核心人设（含称呼、关系、边界）；别人说话 → 只给对外的群聊手册。
@@ -1019,20 +1006,13 @@ async function handleBatch(roomKey, msgs) {
   // 一样的对外人设、一样的群聊规程、一样的垫话、一样的"不是每句都接"。
   // 房间仍然是私聊房间（发消息、记事件都还按原样），只是"该怎么说话"按群来。
   const asGroup = isGroup || !allOwner;
-  // 规程按需挂：闲聊只留四句，像要派活才挂全套。
-  // 判错不要紧——规程不是权限，工具每轮都在，没挂说明她也照样能调。
-  const verdict = judgeFull({
-    isGroup: asGroup,
-    messages: msgs,
-    addressed,
-    toolsJustUsed: touchedPrevRound,
-  });
-  const rulesText = verdict.full ? ruleOf(asGroup) : chatRules(asGroup);
-  // 工具也按需：闲聊走轻装 profile（工具少，每步省两万 token），要动手才切全量
-  const chatProfile = cfg.brain?.headless?.chatProfile || '';
-  const turnProfile = verdict.full || !chatProfile ? null : chatProfile;
-  if (chatProfile) L('brain', turnProfile ? `轻装（${chatProfile}）` : '全量（要动手）');
-  L('rules', verdict.full ? `全套规程 ← ${verdict.reason}` : `精简规程 ← ${verdict.reason}`);
+  // 规程每轮都挂全套。以前按「像不像要派活」在精简/全套之间切，还配了个轻装 profile
+  // 省工具定义；2026-10-26 实测这买卖是亏的：全量比轻装每步只多 9548 token，
+  // 但每换一次档，前缀全变、prompt cache 全废——换挡那轮未命中 155685，
+  // 平稳轮只 18265，多烧 137000。三分钟换两次就把省下的全赔进去了。
+  // 而且判据是正则，猜错的代价由她承担（说了要画、手上没画笔）。
+  // 现在：恒定全套，她想要什么随时都有。
+  const rulesText = ruleOf(asGroup);
   const stateText = stateLine();
   // 上一轮她这边三轮全塌：不替她说话，只把「有这么件事」放回她眼前，由她决定提不提。
   // 只在他俩私聊里提——群里有第三人在场，翻这种旧账既没意义，也轮不到别人知道。
@@ -1043,31 +1023,14 @@ async function handleBatch(roomKey, msgs) {
     ? buildFollowup(msgs, {
       delta, isGroup: asGroup, addressed, selfNames: names, stickerLine,
       personaNote: personaNoteFor({ isGroup: asGroup, isOwner: allOwner, log: (m) => L('persona', m) }),
-      rules: verdict.full ? rulesText : '',
+      rules: rulesText,
       usageLine: usageLineFor(roomKey),
       voice: voiceNoteFor(roomKey),
       state: stateText,
     }) + recallPart
     : promptFresh;
 
-  // 轻装这一轮：先告诉她工具不全，需要就自己开口换（回话后由 wantsFullTools 认）。
-  // promptNoHint 留着给她"要全套"时重跑用——那句提示在全套那一轮里没有意义。
-  const promptNoHint = prompt;
-  if (turnProfile) {
-    const hint = String.fromCharCode(10, 10) + LIGHT_HINT;
-    promptFresh += hint;
-    prompt += hint;
-  }
-
-  // 缓存记账：同一会话里档位一换，工具定义那段前缀就变了，上一轮的 prompt cache 接不上。
-  // 这里只记日志、不改行为——先看清换挡有多勤，再决定值不值得把档位固定住。
-  {
-    const prevProf = lastProfile.get(roomKey);
-    if (prevProf !== undefined && prevProf !== turnProfile) {
-      L('brain', `会话 ${roomKey} 换挡：${prevProf || '全量'} → ${turnProfile || '全量'}，这一轮前缀变了（缓存接不上）`);
-    }
-    lastProfile.set(roomKey, turnProfile);
-  }
+  // 轻装/换档：2026-10-26 整条砍了（见上）。她永远拿全套工具和全套规程。
 
   // 这一批里别人发的图：就算不许动手，也得让她看一眼，不然群里她永远"打不开"。
   // 要放在拼提示词之前——"这一轮带图、看图是允许的"这句话得先落到她眼前，
@@ -1144,8 +1107,6 @@ async function handleBatch(roomKey, msgs) {
   // 而 SendInput 打字是打给“当前前台窗口”的，弹窗一抢前台，字就打空了。
   const onEventAcked = (ev) => {
     if (ev?.type === 'tool_call') {
-      // 记一笔：这个房间在动手。下一轮就算他没明说，也知道还在同一条线上。
-      lastRoundTouched.set(roomKey, true);
       // 顺手记下她手上在干什么——他插话时那句"我在忙什么"就是从这儿来的
       const run = runningTurns.get(roomKey);
       if (run && run.tools.length < 12) {
@@ -1170,31 +1131,7 @@ async function handleBatch(roomKey, msgs) {
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
-  result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, profile: turnProfile, model: turnModel });
-
-  // 轻装那一轮，她自己说要全套工具：换档重跑一次。
-  // 她比正则准——与其猜「他是不是要动手」，不如让她自己说一声。
-  if (turnProfile && result && wantsFullTools(result.text)) {
-    L('brain', '她自己要全套工具，换档重跑这一轮');
-    try {
-      const full = await brain.run({
-        prompt: promptNoHint,
-        sessionId: sid,
-        room: roomKey,
-        onEvent: onEventAcked,
-        profile: null,
-        model: turnModel,
-      });
-      if (full && String(full.text || '').trim()) result = full;
-    } catch (e) {
-      L('brain', `换档重跑没成，还是用原来那一轮：${e?.message ?? e}`);
-    }
-  }
-  // 那句标记是给她自己看的，别原样发给先生。
-  if (result && typeof result.text === 'string') {
-    const cleaned = result.text.replace(/<full\s*\/?>\s*/gi, '').trim();
-    if (cleaned !== result.text) result.text = cleaned;
-  }
+  result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent: onEventAcked, model: turnModel });
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       const b = gate.blocked;
@@ -1225,7 +1162,6 @@ async function handleBatch(roomKey, msgs) {
         sessionId: null,
         room: roomKey,
         onEvent,
-        profile: turnProfile,
         model: turnModel,
       });
     } catch (err2) {
@@ -1257,7 +1193,6 @@ async function handleBatch(roomKey, msgs) {
           sessionId: null,
           room: roomKey,
           onEvent,
-          profile: turnProfile,
           model: turnModel,
         });
       } catch (err3) {
@@ -1299,8 +1234,6 @@ async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
         const r = await brain.run({
           prompt: '（他就在私聊里等着你回话。刚才你想沉默，但这里不能沉默——回他一句，短一点也行。）\n' + oneLine(last.text ?? ''),
           sessionId: sessions.get(roomKey),
-          // 追这一句是闲聊，直接走轻装那套
-          profile: cfg.brain?.headless?.chatProfile || null,
         });
         return await finishTurn(roomKey, last, Object.assign({}, r, { __retried: true }), conflicts, msgs);
       } catch (e) {

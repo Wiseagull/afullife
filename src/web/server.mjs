@@ -6,6 +6,12 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { ROOT, notebookDir } from '../config.mjs';
+
+// 面板眉头上要显示版本号。读一次就够——桥重启才会换版本。
+const PKG_VERSION = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || ''; }
+  catch { return ''; }
+})();
 import { ensureToken, TOKEN_HEADER } from './token.mjs';
 import { pickSamples, loadStore, saveStore, setScope, samplesFor, parseScope, voiceBlock, kindOfRoom } from '../body/voice.mjs';
 import { ensureSnowLuma } from '../snowluma/launch.mjs';
@@ -34,7 +40,6 @@ const EDITABLE = [
   'group.keywords',
   'group.social',
   'debounceMs',
-  'brain.headless.chatProfile',
   'brain.headless.rotateAtTokens',
   'brain.headless.model',
   'brain.headless.decideModel',
@@ -313,7 +318,7 @@ const pair = (m) => (m && String(m.provider || '').trim() && String(m.model || '
       if (area === 'config' && req.method === 'GET') {
         const out = {};
         for (const p of EDITABLE) setPath(out, p, getPath(cfg, p));
-        return json(res, 200, { ok: true, config: out, editable: EDITABLE, needsRestart: NEEDS_RESTART }, origin);
+        return json(res, 200, { ok: true, config: out, version: PKG_VERSION, editable: EDITABLE, needsRestart: NEEDS_RESTART }, origin);
       }
 
       if (area === 'config' && req.method === 'POST') {

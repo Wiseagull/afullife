@@ -158,8 +158,10 @@ const DEFAULTS = {
   },
   brain: {
     kind: 'none',             // none（只收不说话）| headless（起一次 DSH 干活）
-    // headless 的具体参数（profile / workspace / timeoutMs / chatProfile / rotateAtTokens）在这里给默认，
-    // 真实值一般写在 config.local.json；chatProfile 留空 = 不换 profile。
+    // headless 的具体参数（profile / workspace / timeoutMs / rotateAtTokens）在这里给默认，
+    // 真实值一般写在 config.local.json。
+    // 2026-10-26 去掉了 chatProfile：以前闲聊走轻装 profile，实测换档洗 prompt cache，
+    // 一次多烧 137000 token，比省下的工具定义贵十倍。现在恒定全套。
     headless: {
       // 会话里每步的上下文超过这么多 token 就换一个新会话。
       // 一轮有几步，每步都要把整段历史重看一遍——会话越长越贵，所以要定期换。
