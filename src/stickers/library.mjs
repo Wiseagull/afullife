@@ -31,6 +31,132 @@ const fingerprint = (file) => {
 };
 
 /**
+ * 这张图里到底有没有画面。
+ *
+ * 2026-11-01 15:2x 撞到的：一张 108 字节的 GIF89a，画布 300x300，里头三帧全是 1x1。
+ * 它从正常的入库路径进来了，占了一个待审名额，筛的时候才发现是一张空纸。
+ * 三个不同的图 ID（1001729442 / 106725840 / 2133351958）哈希完全一样——
+ * 同一个占位符换了三个信封寄过来。sniffExt 只看头四个字节，拦不住这种东西。
+ *
+ * 这里不引第三方库，按容器格式自己读尺寸，只回答两件事：
+ *   ① 这文件里有没有一张画（没画面 = 没送到，不是图）；
+ *   ② 有的话，最大那一帧多大（用来认出「画布 300x300、帧却只有 1 像素」的占位符）。
+ * 不求完整解码，也不验校验和——坏在半路的图本来也不该进库。
+ *
+ * 认不出来就返回 null，让调用方放过去：宁可多收一张，不要拿没把握的解析
+ * 把真图拦在外面（JPEG 的段结构太松散，这里只做到「读得出 SOF 就算数」）。
+ */
+export const probeImage = (file) => {
+  let b;
+  try { b = fs.readFileSync(file); } catch { return null; }
+  if (b.length < 24) return null;
+
+  // PNG：IHDR 一定在开头，宽高各 4 字节大端
+  if (b[0] === 0x89 && b.toString('latin1', 1, 4) === 'PNG') {
+    if (b.toString('latin1', 12, 16) !== 'IHDR' || b.length < 24) return { type: 'png', width: 0, height: 0, frames: [] };
+    const width = b.readUInt32BE(16);
+    const height = b.readUInt32BE(20);
+    return { type: 'png', width, height, frames: width && height ? [{ width, height }] : [] };
+  }
+
+  // GIF：画布在头里，每帧的尺寸在 image descriptor（0x2C）里
+  const head = b.toString('latin1', 0, 6);
+  if (head === 'GIF87a' || head === 'GIF89a') {
+    if (b.length < 13) return { type: 'gif', width: 0, height: 0, frames: [] };
+    const width = b.readUInt16LE(6);
+    const height = b.readUInt16LE(8);
+    const flags = b[10];
+    let p = 13;
+    if (flags & 0x80) p += 3 * (1 << ((flags & 7) + 1)); // 全局调色板
+    const frames = [];
+    // 长度前缀的子块，遇到 0 长度块终止
+    const skipBlocks = () => {
+      while (p < b.length) {
+        const n = b[p];
+        p += 1 + n;
+        if (!n) return;
+      }
+    };
+    while (p < b.length) {
+      const tag = b[p];
+      if (tag === 0x3b) break; // trailer
+      if (tag === 0x2c) {
+        if (p + 10 > b.length) break;
+        const fw = b.readUInt16LE(p + 5);
+        const fh = b.readUInt16LE(p + 7);
+        const lf = b[p + 9];
+        frames.push({ width: fw, height: fh });
+        p += 10;
+        if (lf & 0x80) p += 3 * (1 << ((lf & 7) + 1)); // 局部调色板
+        p += 1; // LZW 最小码长
+        skipBlocks();
+      } else if (tag === 0x21) {
+        p += 2; // 0x21 + 标签
+        skipBlocks();
+      } else break;
+    }
+    return { type: 'gif', width, height, frames };
+  }
+
+  // WebP：三个变体，尺寸位置各不相同
+  if (b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP') {
+    const four = b.toString('latin1', 12, 16);
+    if (four === 'VP8X' && b.length >= 30) {
+      const width = b.readUIntLE(24, 3) + 1;
+      const height = b.readUIntLE(27, 3) + 1;
+      return { type: 'webp', width, height, frames: [{ width, height }] };
+    }
+    if (four === 'VP8 ' && b.length >= 30) {
+      const width = b.readUInt16LE(26) & 0x3fff;
+      const height = b.readUInt16LE(28) & 0x3fff;
+      return width && height
+        ? { type: 'webp', width, height, frames: [{ width, height }] }
+        : { type: 'webp', width: 0, height: 0, frames: [] };
+    }
+    if (four === 'VP8L' && b.length >= 25) {
+      const bits = b.readUInt32LE(21);
+      const width = (bits & 0x3fff) + 1;
+      const height = ((bits >> 14) & 0x3fff) + 1;
+      return { type: 'webp', width, height, frames: [{ width, height }] };
+    }
+    return null; // 认不出的 RIFF 就别判
+  }
+
+  // JPEG：找 SOF（C0-CF，去掉 C4/C8/CC），宽高在里面。读不到就说不知道。
+  if (b[0] === 0xff && b[1] === 0xd8) {
+    let p = 2;
+    while (p + 9 < b.length) {
+      if (b[p] !== 0xff) { p += 1; continue; }
+      const m = b[p + 1];
+      if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { p += 2; continue; }
+      const len = b.readUInt16BE(p + 2);
+      if (len < 2) break;
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+        const height = b.readUInt16BE(p + 5);
+        const width = b.readUInt16BE(p + 7);
+        return width && height
+          ? { type: 'jpeg', width, height, frames: [{ width, height }] }
+          : { type: 'jpeg', width: 0, height: 0, frames: [] };
+      }
+      p += 2 + len;
+    }
+    return null;
+  }
+  return null;
+};
+
+/**
+ * 只有信封没有信：一帧都没有，或者最大的一帧也就一个像素。
+ * 传入 null（认不出格式）时返回 false —— 不判，不是放行也不是拦。
+ */
+const looksEmpty = (info) => {
+  if (!info) return false;
+  if (!info.frames || !info.frames.length) return true;
+  const biggest = info.frames.reduce((m, f) => Math.max(m, (f.width || 0) * (f.height || 0)), 0);
+  return biggest <= 1;
+};
+
+/**
  * 看文件头猜真身。QQ 下来的图统统叫 `.png`，里头可能是 jpg 也可能是 gif；
  * 按名字存下去，后面按图片格式读它的人（比如我自己看图）会被扩展名骗到，
  * 直接报「声明是 png，内容不是」。所以存的时候按真身取名。
@@ -94,6 +220,15 @@ export class StickerLibrary {
     // 存的时候按文件头取名，不按 QQ 给的假扩展名（见 sniffExt 的注释）
     const sniffed = sniffExt(src);
     const real = sniffed && EXT_OK.has(sniffed) ? sniffed : ext;
+    // 只有信封没有信的（见 probeImage 的注释）：不进库，也不占待审名额。
+    // 认不出格式的不拦 —— 宁可多收一张，也别拿没把握的解析把真图挡在外面。
+    const probe = probeImage(src);
+    if (looksEmpty(probe)) {
+      const why = probe && probe.frames && probe.frames.length
+        ? `最大一帧只有 ${probe.frames.reduce((m, f) => Math.max(m, f.width * f.height), 0)} 个像素`
+        : '里头一帧都没有';
+      throw new Error(`这张图里没有画面（${probe?.type || real}，${why}）`);
+    }
     const size = fs.statSync(src).size;
     const originName = path.basename(src);
 
@@ -282,8 +417,9 @@ export class StickerLibrary {
   /**
    * 库满了就自己收一收：按“用得多不多”排，用得最少的先走。
    *
-   * 排序用的是三段：用过的次数 → 最后一次用的时间 → 什么时候收进来的。
+   * 排序用的是四段：用过的次数 → 最后一次用的时间 → 什么时候收进来的。
    * 所以从来没发过的、最老的那些最先被删；常用的那些永远排后面。
+   * 例外是"刚收进来、还没分类"的（见下面 GRACE_MS）：它们排在最后，先让老的走。
    *
    * 删掉的不只是记录，磁盘上的图也一起删；记录先写进
    * `data/stickers/archive-YYYY-MM-DD.jsonl`，想捞还能捞。
@@ -296,15 +432,31 @@ export class StickerLibrary {
     const over = () => count > maxCount || bytes > limitBytes;
     if (!over()) return { removed: 0, count, bytes };
 
-    // 排序分四档，别把「没用过」直接当 0 次——现在库里绝大多数是空记录，
+    // 排序分几档，别把「没用过」直接当 0 次——现在库里绝大多数是空记录，
     // 按 0 次排等于按入库时间排，会专挑最早存的删（2026-10-21 实测发现的问题）。
     //   ⓪ 标了「重复」= 内容跟别人重了 → 最先走（2026-10-22 加的；删了 archive 里还留着）
     //   ① 没标签 = 不知道什么场合用 → 其次
     //   ② 有标签但从没发过 = 还没试过 → 再次，早存的先走
     //   ③ 发过的 → 按「多久没用了」从久到近
+    // 刚收进来、还没分类的，先别急着删：清库是每小时一次，而给她补标签的
+    // 体检是每 6 小时一次（config.upkeepMs），两个钟对不上——2026-10-27 早上
+    // 07:30~08:37 进来的 6 张，全在下一小时的清理里当成「没标签」删了，
+    // 体检一次都还没轮到它们。所以给「待分类」留一段宽限期；
+    // 库里实在堆太多（超过上限 24 张）时才重新把它们排回最前面。
+    //
+    // 宽限期原来是 6 小时，跟体检同长——那是假设「我一直在看」。2026-11-01
+    // 早上撞了反例：睡了 13 小时，11:31 那次 prune 把 k1376/k1383/k1384 当作
+    // 「老的、没标签」剪了，它们一次都没被看过（按字节大的先走，正好轮到它们）。
+    // 宽限期得比「人最久不碰它」的时间长，不然它只在醒着的时候成立。
+    // 24 小时 = 一整夜加一个白天，够它至少轮到一次；房间不够（roomy 为假）时
+    // 这条保护仍然让路，库不会因为攒着待分类而无限长。
+    const GRACE_MS = 24 * 3600 * 1000;
+    const roomy = count <= maxCount + 24;
+    const fresh = (it) => roomy && it.pending === true && Date.now() - (it.addedAt || 0) < GRACE_MS;
     const tier = (it) => {
       const tagged = Array.isArray(it.tags) && it.tags.length > 0;
       if ((it.tags || []).includes('重复')) return -1;
+      if (fresh(it)) return 3;
       if (!(it.used > 0)) return tagged ? 1 : 0;
       return 2;
     };
@@ -361,6 +513,8 @@ export class StickerLibrary {
       }
       try { fs.unlinkSync(target); } catch { /* 文件早没了就算 */ }
     }
+    const left = this.#data.items.filter(fresh).length;
+    if (left) logger('sticker', `留下 ${left} 张刚收进来、还没分类的，等体检来打标签`);
     logger('sticker', `库满了，清掉 ${gone.length} 张（用得最少的先走），剩 ${count} 张 / ${(bytes / 1048576).toFixed(1)}MB`);
     return { removed: gone.length, count, bytes };
   }

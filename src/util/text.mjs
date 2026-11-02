@@ -32,6 +32,33 @@ export function toPlain(md) {
 }
 
 /**
+ * Markdown 图片 → 发图标记。
+ * QQ 不认 Markdown，而 toPlain 会把 ![说明](路径) 削成只剩「说明」两个字，
+ * 路径跟着被吃掉：图静默发不出去，他那边只看到一行没头没脑的话。
+ * 所以在清洗之前先把图片抠成 [[img:路径]]，走桥里发图那条通路。
+ */
+export function markdownImagesToTags(md) {
+  return String(md ?? '').replace(
+    /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/g,
+    (_m, angled, plain) => `[[img:${String(angled || plain).trim()}]]`,
+  );
+}
+
+/**
+ * 把正文里的图抠成路径：Markdown 图片和 [[img:绝对路径]] 两种写法都认。
+ * 回话那条路（sendTurn）另有一份带审计占位符的，这一份给自由活动用。
+ * 2026-10-30 从 main.mjs 挪过来：纯函数，摆在这儿 selftest 才够得着。
+ */
+export function pullImagePaths(text) {
+  const paths = [];
+  const stripped = markdownImagesToTags(text).replace(/\[\[img:([^\]]+)\]\]/gi, (_m, p) => {
+    paths.push(String(p).trim().replace(/^["']|["']$/g, ''));
+    return '';
+  });
+  return { text: stripped.replace(/[ \t]+\n/g, '\n').trim(), paths: paths.filter(Boolean) };
+}
+
+/**
  * 把长文切成若干段，尽量在段落 > 换行 > 句末标点处断开。
  * 单段都不超过 max；切不动时硬切。
  */

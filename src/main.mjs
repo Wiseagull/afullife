@@ -30,10 +30,10 @@ import { UsageStore, describeUsage } from './usage/store.mjs';
 import { distill } from './memory/distill.mjs';
 import { upkeep, upkeepStickers } from './memory/upkeep.mjs';
 import { screenStickers } from './stickers/screen.mjs';
-import { toPlain , oneLine } from './util/text.mjs';
+import { toPlain, oneLine, markdownImagesToTags, pullImagePaths } from './util/text.mjs';
 import { createRouter } from './body/router.mjs';
 import { Debounce } from './body/debounce.mjs';
-import { FreeTime } from './body/freetime.mjs';
+import { FreeTime, recentTalk } from './body/freetime.mjs';
 import { Doing } from './body/doing.mjs';
 import { restLine, restState, justWoke } from './body/rest.mjs';
 import { startAutoFree } from './body/freetime-auto.mjs';
@@ -44,8 +44,9 @@ import { Gate, classify } from './safety/gate.mjs';
 import { acquireLock } from './util/lock.mjs';
 import os from 'node:os';
 import { watchParent } from './util/parent.mjs';
+import { createStaleWatch } from './util/stale-watch.mjs';
 import { startWeb } from './web/server.mjs';
-import { cleanupImages } from './media/cleanup.mjs';
+import { cleanupImages, VIDEO_RE } from './media/cleanup.mjs';
 import { sniffImage, sniffVideo } from './media/sniff.mjs';
 import { gifFrameCount, gifToMp4 } from './media/gif.mjs';
 import { StickerLibrary } from './stickers/library.mjs';
@@ -141,29 +142,75 @@ const cursorFile = path.join(cfg.dataDir, 'memory', 'cursor.json');
 const pending = new PendingStore({ file: path.join(cfg.dataDir, 'memory', 'pending.json') });
 
 // 自由活动：她自己待一段时间的那个循环
+/** 事件流里"说的话"只有这两种；gate/audit 那种记账事件没有正文，
+ *  摆进对话里就是一行空白的「有人: 」/「你：」（2026-10-28 02:35 在提示词里数出来的）。 */
+const isTalk = (e) => e?.dir === 'in' || e?.dir === 'out';
 function freeRoomKey() {
   return cfg.freeTime?.room || `private:${cfg.owner.userIds[0] ?? 'owner'}`;
 }
+/**
+ * 发一张图：白名单、格式、大小都过一遍。真发出去了返回 [message_id]，没发返回 null。
+ * 回话和自由活动两条路共用一份检查 —— 各写一份，早晚有一份忘了检查。
+ */
+async function sendImageNow(file, { kind, targetId }) {
+  const p = String(file || '').trim();
+  if (!p) return null;
+  if (!fs.existsSync(p)) { L('send', `图不在：${p}`); return null; }
+  // 只能发白名单里的图（表情库、项目内）。不然群里有人哄她「发那张家里的照片」，
+  // 这条通路绕过闸、也绕过审计的路径遮罩——2026-10-22 外部评审指出的洞。
+  if (!underWorkspace(p)) { L('send', `不许发白名单外的图：${p}`); return null; }
+  try {
+    const head = Buffer.alloc(12);
+    const fd = fs.openSync(p, 'r');
+    try { fs.readSync(fd, head, 0, 12, 0); } finally { fs.closeSync(fd); }
+    if (!sniffImage(head)) { L('send', `不像图片，不发：${p}`); return null; }
+    if (fs.statSync(p).size > 12 * 1024 * 1024) { L('send', `图太大（>12MB），不发：${p}`); return null; }
+  } catch (err) {
+    L('send', `验图失败，不发（${p}）：${err?.message ?? err}`);
+    return null;
+  }
+  const one = kind === 'group'
+    ? await sender.sendGroupImage(targetId, p)
+    : await sender.sendPrivateImage(targetId, p);
+  L('send', `发图 ${p}`);
+  return one;
+}
+
 async function freeSay(text, opts = {}) {
   const room = freeRoomKey();
   const qq = String(room).replace(/^private:/, '').replace(/^group:/, '');
-  const ids = String(room).startsWith('group:')
-    ? await sender.sendGroup(qq, text, opts)
-    : await sender.sendPrivate(qq, text, opts);
+  const isGroup = String(room).startsWith('group:');
+  // 自由活动不走 sendTurn：那边抠图、遮路径的活儿这里得自己来一遍。
+  // 不然 Markdown 图片只剩说明文字、[[img:]] 原样当字发出去，看着像发了其实没图（2026-10-29 踩了两次）。
+  const { text: say, paths } = pullImagePaths(text);
+  const sentFiles = [];
+  for (const p of paths) {
+    try {
+      const one = await sendImageNow(p, { kind: isGroup ? 'group' : 'private', targetId: qq });
+      if (one) sentFiles.push(p);
+    } catch (err) {
+      L('send', `发图失败（${p}）：${err?.message ?? err}`);
+    }
+  }
+  if (!say && !sentFiles.length) return;
+  const ids = !say ? [] : (isGroup
+    ? await sender.sendGroup(qq, say, opts)
+    : await sender.sendPrivate(qq, say, opts));
   // 发到一半被他打断的话，账上只记真正发出去的那几段，别把没发的也写进去。
-  const actual = opts?.aborted ? (opts.sentParts || []).join(' ') : text;
+  const actual = opts?.aborted ? (opts.sentParts || []).join(' ') : say;
   // free: true —— 这句是自由活动里她自己主动说的，不走房间会话。
   // 装配背景时要按这个标记补给她，否则她下次就真当没说过。
   events.append({
     dir: 'out',
     room,
-    kind: String(room).startsWith('group:') ? 'group' : 'private',
+    kind: isGroup ? 'group' : 'private',
     id: qq,
     msgId: ids?.[0] ?? null,
-    text: actual || text,
+    text: actual || say,
+    ...(sentFiles.length ? { images: sentFiles } : {}),
     free: true,
   });
-  L('out', `${room} → ${(actual || text).slice(0, 60)}`);
+  L('out', `${room} → ${(actual || say).slice(0, 60)}${sentFiles.length ? `（图 ${sentFiles.length} 张）` : ''}`);
 }
 // 她的兴趣账本：只记"做过没有、上次什么感觉"，意愿本身写在 persona/self.md 里。
 // 开机先同步一次 self.md——她在那儿新写一条，这边就自动认领。
@@ -233,7 +280,6 @@ const stateDelay = () => {
 };
 
 const freeTime = new FreeTime({
-  onUsage: recordUsage,
   // 她在自己那段时间里说「要去洗澡」就记下来；忙完了就收尾。
   // 这是唯一一条写状态的入口——别的地方都不许改它。
   onBusy: (task, minutes) => {
@@ -255,18 +301,33 @@ const freeTime = new FreeTime({
   // 这个房间最后一条是谁说的、他上一次开口是什么时候——开场该不该硬开口看这个
   roomState: () => {
     const room = freeRoomKey();
-    const list = events.readRecent({ room, limit: 40 });
+    // 只留"说的话"：闸记的事（dir:'gate'）也带着 room 落在同一份事件流里，混进来会在对话里占一行空话。
+    const list = events.readRecent({ room, limit: 40 }).filter(isTalk);
     const last = list.length ? list[list.length - 1] : null;
     const lastIn = list.slice().reverse().find((e) => e.dir === 'in') || null;
+    // 她最后一次「在回话里应他」的时刻——自由活动那几拍不算。
+    // 2026-10-27 16:20 那次：他 16:14 说完，她 16:16 答完（那条答了很久），
+    // 16:20 自由那一拍按"他安静满 5 分钟"就醒了，接着说了句和她刚说过的正相反的话。
+    // 复盘：她那句也是这个房间的"最近一句"，只盯他的时刻永远追不上两个人的对话。
+    // 但只认回话里的，不认自由活动自己发的（e.free），否则她每拍都在刷新，自由时间永远开不起来。
+    const lastOut = list.slice().reverse().find((e) => e.dir === 'out' && e.free !== true) || null;
     // 他那句是叫她（@ 她）还是回她（引用她说过的某条）——群里的别人聊天不算
     const mineIds = new Set(list.filter((e) => e.dir === 'out' && e.msgId).map((e) => String(e.msgId)));
     return {
       lastTs: last?.ts ?? 0,
       lastDir: last?.dir ?? '',
       lastInTs: lastIn?.ts ?? 0,
+      lastOutTs: lastOut?.ts ?? 0,
       lastInText: String(lastIn?.text ?? ''),
       lastInAtMe: lastIn?.atMe === true,
       lastInReplyToMe: Boolean(lastIn?.replyId && mineIds.has(String(lastIn.replyId))),
+      // 这个房间最近说过的话（他说的 + 她说的，含她自己刚在回话里说的那几句）。
+      // 自由活动那条链挂的是另一条 DSH 会话，看不见回话那条链——2026-10-27 11:52
+      // 他在回话里问了「按不按条数挂」，回话里答过了，11:56 那一拍又答一遍，就是这么来的。
+      //
+      // 每句都带「多久之前」，并且只取最近半小时（2026-10-30 23:52 那次：两小时前的
+      // 话和刚刚的话并排放着，读起来都是「刚才」，她绕着同一件事又讲了两拍）。
+      talk: recentTalk(list, { windowMs: 30 * 60 * 1000, limit: 12 }),
     };
   },
   drafts: (n = 3) => selfDrafts.render(n),
@@ -356,6 +417,10 @@ const slotModel = (name) => () => cfg.brain?.headless?.[name] || null;
 const decideBrain = withModel(worker, slotModel('decideModel'));
 // 看图那两个活要 read_image：worker 本来就走全量 profile（轻装那套工具少，没这工具），别在这儿换
 const visionBrain = withModel(worker, slotModel('visionModel'));
+// 后台那四件（体检 / 整理记忆 / 交接纸条 / 筛表情）都走 worker。
+// 挂在 worker 上、放在这两个壳之后：壳里的 run 是调 base.run，动态属性查找，
+// 所以它们也会走到这一层——在这儿包装一次就够，别在壳上再包（会记两遍）。
+meterRun(worker);
 
 let lastSeenTs = Date.now();
 // 拼给提示词的那一句「今天花了多少」：全局 + 这个房间
@@ -372,21 +437,42 @@ function usageLineFor(roomKey) {
   }
 }
 
-// 记一轮的用量。kind: chat（聊天）/ free（自由活动）/ maintain（整理记忆）
-function recordUsage(roomKey, result, kind = 'chat') {
-  const u = result && result.usage;
-  if (!u) return;
-  try {
-    const steps = Number(result.steps) || 0;
-    usageStore.add({ room: roomKey, usage: u, model: cfg.brain?.model || '', kind, steps });
-    // 每步上下文 = 这一轮总共读了多少 ÷ 步数。它会随会话变长而涨，涨到阈值就该换会话。
-    // 只按对话轮算：自由活动用的是另一条自己的会话，不该拿它的数去换房间的会话。
-    if (steps > 0 && kind !== 'free') contextPerStep.set(roomKey, Math.round(u.totalTokens / steps));
-    L('usage', `${kind} ${roomKey} 用了 ${u.totalTokens} token（缓存 ${u.cacheReadTokens}，${steps} 步，每步约 ${steps > 0 ? Math.round(u.totalTokens / steps) : 0}）`);
-  } catch (e) {
-    L('usage', `记账失败：${e?.message ?? e}`);
-  }
+// 每一轮真实花掉的 token 都要进账本。
+//
+// 以前只有两处记账：正常回话（finishTurn）、自由活动（FreeTime 的 onUsage）。
+// 其余全漏——aside 每轮另起一个新会话（sessionId: null，零缓存，单次最贵）、
+// 冷场主动开口、等工具跑完的续接、体检、整理记忆、交接纸条、筛表情。
+// 2026-10-28 用户看出面板上的数字比实际少了将近一半，就是这些漏的。
+//
+// 做法是在脑子外面套一层：不管谁调 run、带什么 kind，回来先把 usage 记下。
+// kind 由调用方给（opts.kind），不给就当聊天。
+function meterRun(inst) {
+  if (!inst || typeof inst.run !== 'function' || inst.__metered) return inst;
+  const run = inst.run.bind(inst);
+  inst.run = async (opts = {}) => {
+    const r = await run(opts);
+    try {
+      const u = r && r.usage;
+      if (u) {
+        const kind = String(opts.kind || 'chat');
+        const steps = Number(r.steps) || 0;
+        usageStore.add({ room: opts.room || '', usage: u, model: cfg.brain?.model || '', kind, steps });
+        // 每步上下文 = 这一轮总共读了多少 ÷ 步数。它会随会话变长而涨，涨到阈值就该换会话。
+        // 只按对话轮算：自由活动用的是另一条自己的会话，不该拿它的数去换房间的会话。
+        if (opts.room && steps > 0 && kind === 'chat') {
+          contextPerStep.set(opts.room, Math.round(u.totalTokens / steps));
+        }
+        L('usage', `${kind} ${opts.room || '-'} 用了 ${u.totalTokens} token（缓存 ${u.cacheReadTokens}，${steps} 步）`);
+      }
+    } catch (e) {
+      L('usage', `记账失败：${e?.message ?? e}`);
+    }
+    return r;
+  };
+  inst.__metered = true;
+  return inst;
 }
+meterRun(brain);
 
 const REMEMBER_RE = /(记住|记一下|记下|别忘了|remember)/i;
 
@@ -406,6 +492,11 @@ async function asideWhileBusy(roomKey, msg) {
     if (!run) return null;                                  // 她没在跑，走正常流程
     const now = Date.now();
     if (now - run.startedAt < ASIDE_AFTER) return null;      // 刚开跑，等正常回话就行
+    // 手上还没真动过工具：没有"在忙什么"可说，这一句只能靠编。
+    // 2026-10-28 01:03:54 就是这么冒出来的——他在等回话，她其实只是在想，
+    // 凭空报了句「本鲸正对着那堆日志一条条数呢」，下一轮还把这句当成自己说过的，
+    // 于是 01:05 又专门解释了它一遍。没活就别插话，正常回话马上就到。
+    if (!run.tools.length) return null;
     if (run.asideAt && now - run.asideAt < ASIDE_MIN_GAP) return null;
     run.asideAt = now;
     const doing = describeDoing(run.tools);
@@ -418,10 +509,12 @@ async function asideWhileBusy(roomKey, msg) {
     const r = await brain.run({
       prompt,
       sessionId: null,                                       // 另起一个，别碰她手上那个会话
+      room: roomKey,
+      kind: 'aside',
     });
     const text = String(r?.text ?? '').trim();
     if (!text || /^(pass|\[silent\])$/i.test(text)) return null;
-    await say(msg, text);
+    await say(msg, text, { aside: true });
     L('aside', `${roomKey} 她在忙（${doing}），先回一句：${text.slice(0, 40)}`);
     return text;
   } catch (e) {
@@ -559,13 +652,15 @@ async function saveVideos(msg) {
   return saveVideoUrls(msg.videos, msg.msgId || Date.now());
 }
 
-/** 直接从桥说话（不是"我"说的那种）—— 审批问答、报错都走这儿。 */
-async function say(msg, text) {
+/** 直接从桥说话（不是"我"说的那种）—— 审批问答、报错都走这儿。
+ *  extra 会原样并进事件记录：aside:true 标的是"她忙的时候先垫的那一句"，
+ *  跟正经回话一样落在 events 里，但事后能分出来是哪条路发的。 */
+async function say(msg, text, extra = {}) {
   const ids = msg.kind === 'group'
     ? await sender.sendGroup(msg.id, text)
     : await sender.sendPrivate(msg.id, text);
   events.append({
-    dir: 'out', room: msg.room, kind: msg.kind, id: msg.id, msgId: ids?.[0] ?? null, text,
+    dir: 'out', room: msg.room, kind: msg.kind, id: msg.id, msgId: ids?.[0] ?? null, text, ...extra,
   });
   L('out', `${msg.room} → ${text.slice(0, 60)}`);
   return ids;
@@ -805,7 +900,11 @@ client.on('event', async (raw) => {
             pending: true,
           });
           if (!dup) L('sticker', `收进候选：${f}`);
-        } catch { /* 收不进去不影响说话 */ }
+        } catch (e) {
+          // 收不进去不影响说话，但别一声不吭：空图 / 坏图被拦下来这件事得在日志里看得见
+          // （2026-11-01：那张 108 字节的空 GIF 就是一路无声地进了待审）
+          L('sticker', `没收 ${path.basename(f)}：${e.message}`);
+        }
       }
     }
   }
@@ -892,7 +991,12 @@ client.on('event', async (raw) => {
 // ── 想 + 说 ──────────────────────────────────────────────
 async function handleBatch(roomKey, msgs) {
   const last = msgs[msgs.length - 1];
-  const recent = events.readRecent({ room: roomKey, limit: 30 });
+  // 只读"说的话"：闸、媒体那种记账事件混进【刚才在这儿的对话】会占一行空白
+  //
+  // 500 条不是为了每轮塞 500 条进去——prompt.mjs 的 fitHistory 会按 token 预算裁。
+  // 这里给足是因为历史段刻意不滑窗（滑窗每轮整段重付，见 prompt.mjs 那段注释），
+  // 要让它自然涨到 rotateAtTokens 才换会话；limit 卡在 30 的话，短句房间永远涨不到那个量级。
+  const recent = events.readRecent({ room: roomKey, limit: 500 }).filter(isTalk);
 
   // 主人的小命令：不走脑子
   const cmdText = String(last.text || '').trim();
@@ -1218,7 +1322,6 @@ async function handleBatch(roomKey, msgs) {
 
 /** 一轮的话说出去、记下来。 */
 async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
-  recordUsage(roomKey, result, 'chat');
   if (result?.sessionId) sessions.set(roomKey, result.sessionId);
   const text = String(result?.text ?? '').trim();
   if (!text) {
@@ -1249,7 +1352,9 @@ async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
   // 不这么做的话：群里审计会把 <盘符>:\... 遮成「[本机路径]」，[[img:<路径>]] 就废了，图静默发不出。
   const imgPaths = [];
   const IMG_MARK = '\uE000';
-  let say = text.replace(/\[\[img:([^\]]+)\]\]/gi, (_m, p) => {
+  // 我要是写成 Markdown 图片（![说明](E:\...\x.png)），先换成发图标记再往下走。
+  // 不换的话 toPlain 只留「说明」，路径被吃干净，图静默发不出（2026-10-29 连着两次踩到）。
+  let say = markdownImagesToTags(text).replace(/\[\[img:([^\]]+)\]\]/gi, (_m, p) => {
     imgPaths.push(String(p).trim().replace(/^["']|["']$/g, ''));
     return `${IMG_MARK}img${imgPaths.length - 1}${IMG_MARK}`;
   });
@@ -1287,37 +1392,10 @@ async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
   const sentImgs = [];
   for (const p of imgOut) {
     try {
-      if (!fs.existsSync(p)) {
-        L('send', `图不在：${p}`);
-        continue;
-      }
-      // 只能发白名单里的图（表情库、项目内）。不然群里有人哄她"发那张家里的照片"，
-      // 这条通路绕过闸、也绕过审计的路径遮罩——2026-10-22 外部评审指出的洞。
-      if (!underWorkspace(p)) {
-        L('send', `不许发白名单外的图：${p}`);
-        continue;
-      }
-      try {
-        const head = Buffer.alloc(12);
-        const fd = fs.openSync(p, 'r');
-        try { fs.readSync(fd, head, 0, 12, 0); } finally { fs.closeSync(fd); }
-        if (!sniffImage(head)) {
-          L('send', `不像图片，不发：${p}`);
-          continue;
-        }
-        if (fs.statSync(p).size > 12 * 1024 * 1024) {
-          L('send', `图太大（>12MB），不发：${p}`);
-          continue;
-        }
-      } catch (err) {
-        L('send', `验图失败，不发（${p}）：${err?.message ?? err}`);
-        continue;
-      }
-      const one = last.kind === 'group'
-        ? await sender.sendGroupImage(last.id, p)
-        : await sender.sendPrivateImage(last.id, p);
+      // 白名单、格式、大小都在 sendImageNow 里查（和自由活动共用一份）
+      const one = await sendImageNow(p, { kind: last.kind, targetId: last.id });
+      if (!one) continue;
       sentImgs.push({ file: p, msgId: one?.[0] ?? null });
-      L('send', `发图 ${p}`);
       // 发出去就记一笔：不然「按使用频率删」永远是空转（2026-10-21 实测发现）
       const hit = stickerLib.findByFile(p);
       if (hit) {
@@ -1370,7 +1448,7 @@ async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
 async function rerunApproved(a) {
   const onEvent = makeOnEvent(a.roomKey);
   try {
-    const result = await brain.run({ prompt: a.prompt, sessionId: a.sid, room: a.roomKey, onEvent, model: a.model || null });
+    const result = await brain.run({ prompt: a.prompt, sessionId: a.sid, room: a.roomKey, onEvent, model: a.model || null, kind: 'awaiting' });
     await finishTurn(a.roomKey, a.last, result, [], []);
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
@@ -1396,7 +1474,7 @@ async function runUpkeep() {
   try {
     const r = await upkeep({ brain: decideBrain, notes, pending, logger: L });
     // 先把候选过一遍眼：像不像表情，看图说话，不按文件大小判
-    const scored = await screenStickers({ brain: visionBrain, stickers: stickerLib, logger: L, maxOps: 4 });
+    const scored = await screenStickers({ brain: visionBrain, stickers: stickerLib, logger: L, maxOps: 16 });
     if (scored.checked) L('sticker', `筛了 ${scored.checked} 张：收 ${scored.kept} / 退 ${scored.rejected} / 跳过 ${scored.skipped}`);
     // 收下的那些如果还没标签，按当时的语境补
     await upkeepStickers({ brain: visionBrain, stickers: stickerLib, logger: L });
@@ -1500,7 +1578,12 @@ const imageDir = path.join(cfg.dataDir, 'images');
 const videoDir = path.join(cfg.dataDir, 'videos');
 const cleanImages = () => {
   try { cleanupImages(imageDir, cfg.images || {}, L); } catch (err) { L('media', `清理失败：${err?.message ?? err}`); }
-  try { cleanupImages(videoDir, cfg.videos || {}, L); } catch (err) { L('media', `清理视频失败：${err?.message ?? err}`); }
+  // 视频得显式传 VIDEO_RE：这个函数默认只认图片扩展名，不传的话 .mp4 一个都不匹配，
+  // 视频清理会静默变成空转（2026-11-02 审计查出来，那时 videos/ 已经堆到 562MB）。
+  try { cleanupImages(videoDir, { ...(cfg.videos || {}), match: VIDEO_RE }, L); } catch (err) { L('media', `清理视频失败：${err?.message ?? err}`); }
+  // 退回的表情挪进 reject/「留个档」，档案本身写在 reject-日期.jsonl 里，图不用一直躺着。
+  // 2026-11-02 审计：这里已经 357 个文件 / 178MB，从 10-20 攒起，一行清理代码都没有。
+  try { cleanupImages(path.join(cfg.dataDir, 'stickers', 'reject'), { retainDays: 30, maxMb: 256 }, L); } catch (err) { L('media', `清理 reject 失败：${err?.message ?? err}`); }
 };
 
 // 表情库满了也自己收：按用得多少排，用得最少的先删（图跟记录一起走，先留档）
@@ -1552,7 +1635,7 @@ async function idleSay(roomKey, mode = 'idle') {
   const t0 = Date.now();
   let result;
   try {
-    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent });
+    result = await brain.run({ prompt, sessionId: sid, room: roomKey, onEvent, kind: 'social' });
   } catch (err) {
     if (err?.code === 'GATE_BLOCKED' && gate.blocked) {
       L('gate', `冷场开口时被拦：${gate.blocked.verdict.why}`);
@@ -1656,12 +1739,26 @@ startWeb({
   usageStore, cfg, logger: { info: L, warn: (tag, msg) => L(tag, msg) }, notes, pending, events, sessions, router, gate, brain, roomNames, freeTime, stickerLib, onebot: client, onConfig: onConfigChanged });
 
 // ── 起 ───────────────────────────────────────────────────
+// 起来之后自己盯一眼：src/ 下还有谁被改过。改完、桥没重启的时候，这个进程读不到它，
+// 而这件事没有报错、没有日志、也没人会说——所以让它自己说，每 5 分钟一次。
+// 只能报"启动之后改的"：我是哪一刻读的代码，是我唯一确定的事；外面的探针管另一半。
+const staleWatch = createStaleWatch({
+  // 两个目录：src/ 是桥自己的代码，plugin/ 是宿主侧（面板要刷新页面，其余要重启 DSH）。
+  // 2026-11-01 栽的三回里，有两回改的不是 src/。
+  // tools/ 不盯：那里全是 spawn 出去的独立脚本，每次调用现读，改完本来就立即生效——盯它只会误报。
+  dir: [path.join(ROOT, 'src'), path.join(ROOT, 'plugin')],
+  logger: L,
+  intervalMs: Number(process.env.QAD_STALE_WATCH_MS ?? 5 * 60 * 1000),
+});
+staleWatch.start();
+
 client.connect();
 
 let closing = false;
 async function shutdown(sig) {
   if (closing) return;
   closing = true;
+  try { staleWatch?.stop(); } catch { /* ignore */ }
   L('exit', `收到 ${sig}，收尾中…`);
   try { await debounce.drain(); } catch { /* ignore */ }
   try { await queue.drain(); } catch { /* ignore */ }

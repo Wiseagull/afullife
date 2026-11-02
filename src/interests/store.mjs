@@ -40,16 +40,36 @@ export function interestsFromPersona(text) {
 export class InterestStore {
   #file;
   #data;
+  #mtime;
 
   constructor({ file }) {
     this.#file = file;
+    this.#load();
+  }
+
+  #statMtime() {
     try {
-      this.#data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return fs.statSync(this.#file).mtimeMs;
+    } catch {
+      return null;
+    }
+  }
+
+  #load() {
+    try {
+      this.#data = JSON.parse(fs.readFileSync(this.#file, 'utf8'));
     } catch {
       this.#data = { items: [] };
     }
     if (!Array.isArray(this.#data.items)) this.#data.items = [];
     this.#migrate();
+    this.#mtime = this.#statMtime();
+  }
+
+  // 记账的不止这一个进程：`node scripts/interests.mjs did …` 随时可能从外面写一笔。
+  // 只在开机读一次盘，桥就会拿旧账一直推荐刚做完的事——所以文件变过就重读。
+  #refresh() {
+    if (this.#statMtime() !== this.#mtime) this.#load();
   }
 
   #migrate() {
@@ -66,19 +86,23 @@ export class InterestStore {
     const tmp = `${this.#file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(this.#data, null, 2), 'utf8');
     fs.renameSync(tmp, this.#file);
+    this.#mtime = this.#statMtime(); // 自己写的不算「外面变过」
   }
 
   all() {
+    this.#refresh();
     return this.#data.items.map((it) => ({ ...it }));
   }
 
   get(key) {
+    this.#refresh();
     const k = String(key || '').trim();
     return this.#data.items.find((i) => i.id === k || i.name === k) || null;
   }
 
   /** 把 self.md 里新写的兴趣导进来（只增不改）。 */
   sync(personaText) {
+    this.#refresh();
     const names = interestsFromPersona(personaText);
     const added = [];
     names.forEach((name, idx) => {
@@ -104,6 +128,7 @@ export class InterestStore {
   }
 
   add({ name, why = '', order = null }) {
+    this.#refresh();
     const n = String(name || '').trim();
     if (!n) throw new Error('兴趣总得有个名字');
     if (this.get(n)) return this.get(n);
@@ -123,6 +148,7 @@ export class InterestStore {
   }
 
   drop(key) {
+    this.#refresh();
     const i = this.#data.items.findIndex((x) => x.id === key || x.name === key);
     if (i < 0) return false;
     this.#data.items.splice(i, 1);
@@ -132,6 +158,7 @@ export class InterestStore {
 
   /** 记一次"做了"。feelings 只留最近 5 条。 */
   did(key, feeling = '') {
+    this.#refresh();
     const it = this.#data.items.find((x) => x.id === key || x.name === key);
     if (!it) return null;
     it.count += 1;
@@ -152,6 +179,7 @@ export class InterestStore {
    * 分高的排前面：久没做的、做得少的、她写在 self.md 前面的。
    */
   pick(n = 3, { now = Date.now(), exclude = [] } = {}) {
+    this.#refresh();
     const skip = new Set(exclude.map(String));
     const scored = this.#data.items
       .filter((it) => !skip.has(it.id) && !skip.has(it.name))

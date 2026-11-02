@@ -2,11 +2,13 @@
 // node scripts/selftest.mjs
 import { normalizeEvent, resolveQuote, shortenQuote, renderTranscript, withFiles } from '../src/body/room.mjs';
 import { createRouter } from '../src/body/router.mjs';
-import { toPlain, splitMessage } from '../src/util/text.mjs';
-import { StickerLibrary } from '../src/stickers/library.mjs';
-import { FreeTime, openingMood, draftLines, shouldYield, stripMarks } from '../src/body/freetime.mjs';
+import { cleanupImages, IMAGE_RE, VIDEO_RE } from '../src/media/cleanup.mjs';
+import { toPlain, splitMessage, markdownImagesToTags, pullImagePaths } from '../src/util/text.mjs';
+import { StickerLibrary, probeImage } from '../src/stickers/library.mjs';
+import { FreeTime, openingMood, draftLines, shouldYield, shouldRotateFree, stripMarks, recentTalk } from '../src/body/freetime.mjs';
+import { parseVerdicts, batchPrompt, screenStickers, makeSheet, uncutNote } from '../src/stickers/screen.mjs';
 import { UsageStore, describeUsage } from '../src/usage/store.mjs';
-import { buildPrompt, buildTriggerLines, videoHint } from '../src/body/prompt.mjs';
+import { buildPrompt, buildTriggerLines, videoHint, fitHistory, roughTokens, HISTORY_MAX_TOKENS } from '../src/body/prompt.mjs';
 
 import { sniffImage, sniffVideo } from '../src/media/sniff.mjs';
 import { gifFrameCount, isAnimatedGif } from '../src/media/gif.mjs';
@@ -22,8 +24,11 @@ import { PokeCooldown } from '../src/body/poke.mjs';
 import { HeadlessBrain, finishedDespiteExit } from '../src/brain/headless.mjs';
 import { restState, restLine } from '../src/body/rest.mjs';
 import { Doing } from '../src/body/doing.mjs';
-import { dedupe } from '../src/memory/upkeep.mjs';
+import { InterestStore } from '../src/interests/store.mjs';
+import { dedupe, upkeep } from '../src/memory/upkeep.mjs';
 import { stallNote, FailBook } from '../src/brain/stall.mjs';
+import { findStart, staleFrom, assess, staleNote } from './probe-stale.mjs';
+import { createStaleWatch } from '../src/util/stale-watch.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -86,6 +91,10 @@ const grpName = normalizeEvent({
 }, { selfId: SELF, selfNames: ['测试bot'] });
 
 check('群里叫名字算叫我', grpName.atMe, true);
+check('群里叫名字：realAt 假', grpName.realAt, false);
+check('群里叫名字：calledMe 真', grpName.calledMe, true);
+check('群里@我：realAt 真', grpAt.realAt, true);
+check('群里@我：calledMe 假（没叫名字）', grpAt.calledMe, false);
 
 check('自己说的话不回流', normalizeEvent({
   post_type: 'message', message_type: 'private', user_id: 3000000001,
@@ -116,6 +125,17 @@ check('群里@我', router.decide({ kind: 'group', room: 'g1', from: '42', atMe:
 check('群里没叫我', router.decide({ kind: 'group', room: 'g2', from: '42', atMe: false, text: '哈哈' }).speak, false);
 check('群里提到关键词', router.decide({ kind: 'group', room: 'g3', from: '42', atMe: false, text: '测试bot呢' }).speak, true);
 
+// 两个开关各管各的：面板上「@ 我 必回」「叫名字 必回」以前声明了却没人读（2026-11-02 审计发现）
+{
+  const noAt = createRouter({ cfg: { ...cfg, group: { ...(cfg.group || {}), speakOnAt: false } } });
+  check('关掉「@ 我」：真 @ 不再直接回', noAt.decide({ kind: 'group', room: 'ga1', from: '42', atMe: true, realAt: true }).speak, false);
+  check('关掉「@ 我」：叫名字照样回', noAt.decide({ kind: 'group', room: 'ga2', from: '42', atMe: true, realAt: false, calledMe: true }).speak, true);
+
+  const noName = createRouter({ cfg: { ...cfg, group: { ...(cfg.group || {}), speakOnName: false } } });
+  check('关掉「叫名字」：叫名字不再直接回', noName.decide({ kind: 'group', room: 'gn1', from: '42', atMe: true, realAt: false, calledMe: true }).speak, false);
+  check('关掉「叫名字」：真 @ 照样回', noName.decide({ kind: 'group', room: 'gn2', from: '42', atMe: true, realAt: true }).speak, true);
+}
+
 // 社交状态机：用固定的随机源测，不然 20% 的概率会让这一行时过时不过
 // 社交参数平时由 config.mjs 的默认值补上；这里直接给，测试不依赖全局默认
 const socialCfg = {
@@ -137,6 +157,39 @@ check('去链接', toPlain('看[这里](https://a.b)'), '看这里');
 check('留代码', toPlain('```js\nlet a = 1;\n```'), 'let a = 1;');
 check('去标题', toPlain('## 标题'), '标题');
 check('去引用', toPlain('> 引用'), '引用');
+// Markdown 图片得转成发图标记，不然 toPlain 会把路径吃干净（2026-10-29 连着两次踩到）
+check('Markdown 图片转标记',
+  markdownImagesToTags('看图 ![鲸鱼](C:\\pics\\whale.png) 就这样'),
+  '看图 [[img:C:\\pics\\whale.png]] 就这样');
+check('Markdown 图片尖括号路径',
+  markdownImagesToTags('![x](<C:\\a b\\c.png>)'),
+  '[[img:C:\\a b\\c.png]]');
+check('Markdown 图片带标题',
+  markdownImagesToTags('![x](C:\\a.png "说明")'),
+  '[[img:C:\\a.png]]');
+check('普通文字不动', markdownImagesToTags('就这样'), '就这样');
+
+// 自由活动那条路的抠图：2026-10-29 连着两次踩到（图只剩一句说明、
+// [[img:]] 原样当字发出去）。当时这函数埋在 main.mjs 里，selftest 够不着；
+// 2026-10-30 挪到 util/text.mjs，这儿才开始守得住。
+check('抠出 Markdown 图，正文只留字',
+  JSON.stringify(pullImagePaths('看图 ![鲸鱼](C:\\pics\\whale.png) 就这样')),
+  JSON.stringify({ text: '看图  就这样', paths: ['C:\\pics\\whale.png'] }));
+check('抠出 [[img:]] 写法',
+  JSON.stringify(pullImagePaths('[[img:C:\\pics\\cat.gif]]')),
+  JSON.stringify({ text: '', paths: ['C:\\pics\\cat.gif'] }));
+check('两种写法混着来，顺序照出现',
+  JSON.stringify(pullImagePaths('先看图 ![x](<C:\\a b\\c.png>) 再说 [[img:"C:\\d.png"]]')),
+  JSON.stringify({ text: '先看图  再说', paths: ['C:\\a b\\c.png', 'C:\\d.png'] }));
+check('一行只有图，正文就空',
+  JSON.stringify(pullImagePaths('![a](C:\\1.png)\n![b](C:\\2.png)')),
+  JSON.stringify({ text: '', paths: ['C:\\1.png', 'C:\\2.png'] }));
+check('没图时正文一个字不动',
+  JSON.stringify(pullImagePaths('就这样，没有图')),
+  JSON.stringify({ text: '就这样，没有图', paths: [] }));
+check('只有空白也算没话说',
+  JSON.stringify(pullImagePaths('  ')),
+  JSON.stringify({ text: '', paths: [] }));
 
 const long = '第一句。'.repeat(600);
 const parts = splitMessage(long, 1200);
@@ -175,12 +228,12 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('视频段被认出来', msg.videos, ['https://x/v.mp4']);
 
   const line = renderTranscript([
-    { name: '某某', text: '你看这个 [视频]', videoFiles: ['E:/ws/data/videos/789-0.mp4'] },
+    { name: '某某', text: '你看这个 [视频]', videoFiles: ['C:/ws/data/videos/789-0.mp4'] },
   ]);
-  ok('对话记录里带视频路径', line.includes('视频1：E:/ws/data/videos/789-0.mp4'));
+  ok('对话记录里带视频路径', line.includes('视频1：C:/ws/data/videos/789-0.mp4'));
 
   const trig = buildTriggerLines([
-    { idx: 1, name: '某某', text: '[视频]', videoFiles: ['E:/ws/data/videos/789-0.mp4'], atMe: true },
+    { idx: 1, name: '某某', text: '[视频]', videoFiles: ['C:/ws/data/videos/789-0.mp4'], atMe: true },
   ], { selfNames: ['小鲸鱼'] });
   ok('群里那句也带视频路径', String(trig).includes('789-0.mp4'));
 
@@ -202,13 +255,13 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
 // 没有路径，她等于看不见图。私聊走 renderTranscript 一直是对的。
 {
   const group = buildTriggerLines([
-    { idx: 1, name: '某某', text: '[图片]', imageFiles: ['E:/x/img1.jpg'], atMe: false },
-    { idx: 2, name: '某某', text: '你看这个', imageFiles: ['E:/x/img2.gif'], atMe: false },
+    { idx: 1, name: '某某', text: '[图片]', imageFiles: ['C:/x/img1.jpg'], atMe: false },
+    { idx: 2, name: '某某', text: '你看这个', imageFiles: ['C:/x/img2.gif'], atMe: false },
     { idx: 3, name: '某某', text: '没有图', atMe: false },
   ], { selfNames: ['小鲸鱼'] });
-  ok('群里带图的消息给了真实路径', group[0].includes('E:/x/img1.jpg'));
+  ok('群里带图的消息给了真实路径', group[0].includes('C:/x/img1.jpg'));
   ok('群里带图的消息不再只剩 [图片] 占位', !group[0].includes('[图片]'));
-  ok('群里带文字又带图，两样都在', group[1].includes('你看这个') && group[1].includes('E:/x/img2.gif'));
+  ok('群里带文字又带图，两样都在', group[1].includes('你看这个') && group[1].includes('C:/x/img2.gif'));
   ok('群里没图的消息不被乱加括号', !group[2].includes('图片1'));
 }
 
@@ -219,8 +272,10 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   const tmpDir = path.join(tmpRoot, 'library');
   fs.mkdirSync(tmpDir, { recursive: true });
   const tmpFile = path.join(tmpRoot, 'library.json');
+  // 8x8 的实心块。原来这里是个 1x1 的 PNG —— 2026-11-01 加了「空图不进库」之后
+  // 那个 fixture 自己也成了空图，留着它就等于一边拦空图一边拿空图当样本。
   const png = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGM4sWUBVsQwtCQAydSHATA1Jj4AAAAASUVORK5CYII=',
     'base64',
   );
   const jpeg = Buffer.from(
@@ -278,6 +333,95 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
     fs.unlinkSync(path.resolve(tmpRoot, ghost.file));
     check('缺图的记录默认还查得到', lost.search({ limit: 10 }).length, 1);
     check('缺图的不递进提示词', lost.search({ limit: 10, onlyPresent: true }).length, 0);
+  }
+
+  // 5. 刚收进来、还没分类的，不能被每小时的清理误删。
+  //    2026-10-27 早上实测：清库每小时一次、补标签的体检 6 小时一次，
+  //    07:30~08:37 进来的 6 张候选全在体检轮到它们之前被当成「没标签」删了。
+  {
+    const gDir = path.join(tmpRoot, 'grace');
+    fs.mkdirSync(gDir, { recursive: true });
+    const gFile = path.join(gDir, 'library.json');
+    const H = 3600 * 1000;
+    const mk = (id, ageH, extra = {}) => {
+      fs.writeFileSync(path.join(gDir, `${id}.png`), Buffer.concat([png, Buffer.from(id)]));
+      return {
+        id, file: `grace/${id}.png`, bytes: 100, tags: [], when: '', ctx: '', from: '',
+        addedAt: Date.now() - ageH * H, usedAt: null, used: 0, pending: true, ...extra,
+      };
+    };
+    const items = [
+      mk('k9001', 0),                                    // 刚进来的
+      mk('k9002', 0),                                    // 也是刚进来的
+      mk('k9003', 30),                                   // 一天多没分类，宽限期已过
+      mk('k9004', 30, { pending: false, tags: ['旧'] }), // 有标签，但从没发过
+    ];
+    fs.writeFileSync(gFile, JSON.stringify({ items, seq: 9004, tombstones: [] }));
+    const glib = new StickerLibrary({ file: gFile, dir: gDir, root: tmpRoot });
+    const gout = glib.prune({ maxCount: 2, maxMb: 200 }, () => {});
+    check('清库先清老的', gout.removed, 2);
+    ok('刚收进来的没被当垃圾删掉', Boolean(glib.get('k9001') && glib.get('k9002')));
+    ok('过期的待分类和没人用的旧标签先走', !glib.get('k9003') && !glib.get('k9004'));
+  }
+
+  // 5b. 宽限期是 24 小时，不是 6 小时。2026-11-01 早上睡了 13 小时，
+  //     11:31 那次 prune 把三张一次都没被看过的待分类剪了——因为 6 小时
+  //     的宽限期假设「我一直在看」。宽限期得撑过一整夜。
+  {
+    const gDir = path.join(tmpRoot, 'grace-night');
+    fs.mkdirSync(gDir, { recursive: true });
+    const gFile = path.join(gDir, 'library.json');
+    const H = 3600 * 1000;
+    const mk = (id, ageH, extra = {}) => {
+      fs.writeFileSync(path.join(gDir, `${id}.png`), Buffer.concat([png, Buffer.from(id)]));
+      return {
+        id, file: `grace-night/${id}.png`, bytes: 100, tags: [], when: '', ctx: '', from: '',
+        addedAt: Date.now() - ageH * H, usedAt: null, used: 0, pending: true, ...extra,
+      };
+    };
+    const items = [
+      mk('k9011', 20),                                   // 睡前进来的，一觉醒来还没被看过
+      mk('k9012', 40, { pending: false, tags: ['旧'] }), // 有标签，但从没发过
+    ];
+    fs.writeFileSync(gFile, JSON.stringify({ items, seq: 9012, tombstones: [] }));
+    const glib = new StickerLibrary({ file: gFile, dir: gDir, root: tmpRoot });
+    glib.prune({ maxCount: 1, maxMb: 200 }, () => {});
+    ok('睡一夜之后待分类还在', Boolean(glib.get('k9011')));
+    ok('这种情况下走的是有标签没发过的旧图', !glib.get('k9012'));
+  }
+
+  // 6. 只有信封没有信的图不进库。
+  //    2026-11-01 15:2x：一张 108 字节的 GIF89a 从正常入库路径进来，画布 300x300、
+  //    里头三帧全是 1x1（三个不同图 ID 哈希一模一样，是同一个占位符换了三个信封）。
+  //    sniffExt 只看前四个字节，拦不住；现在 add() 会用 probeImage 读一次真实尺寸。
+  {
+    const eDir = path.join(tmpRoot, 'empty');
+    fs.mkdirSync(eDir, { recursive: true });
+    const elib = new StickerLibrary({ file: path.join(eDir, 'library.json'), dir: eDir, root: tmpRoot });
+    // 造一个结构合法的 GIF：画布 cw x ch，每帧 fw x fh
+    const gif = (cw, ch, frames) => {
+      const head = Buffer.alloc(7);
+      head.writeUInt16LE(cw, 0);
+      head.writeUInt16LE(ch, 2);
+      const parts = [Buffer.from('GIF89a', 'latin1'), head];
+      for (const [fw, fh] of frames) {
+        const d = Buffer.alloc(10);
+        d[0] = 0x2c;
+        d.writeUInt16LE(fw, 5);
+        d.writeUInt16LE(fh, 7);
+        parts.push(d, Buffer.from([0x02, 0x02, 0x44, 0x01, 0x00]));
+      }
+      parts.push(Buffer.from([0x3b]));
+      return Buffer.concat(parts);
+    };
+    const empty = gif(300, 300, [[1, 1], [1, 1], [1, 1]]);
+    let rejected = '';
+    try { elib.add({ src: blurp('empty.gif', empty), tags: [] }); } catch (e) { rejected = e.message; }
+    ok('空 GIF 被拦住', rejected.includes('没有画面'));
+    check('空 GIF 没占编号', elib.stats().count, 0);
+    const real = elib.add({ src: blurp('real.gif', gif(64, 64, [[64, 64], [64, 64]])), tags: ['动图'] });
+    ok('画得出来的动图照收', real.dup === false && real.item.file.endsWith('.gif'));
+    check('动图帧数读得出来', probeImage(real.item.abs).frames.length, 2);
   }
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -398,6 +542,19 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
     messages: [{ kind: 'private', from: '1', fromName: '先生', text: '在吗' }],
   });
   check('没用量就不写这一段', noUsage.includes('【今天的量】'), false);
+}
+
+// ── 刚才那一屏是答过的：别让新一轮再答一遍 ─────────────────
+// 2026-10-28 01:03 他说「想和你一起睡」，01:03:47 答过一次；01:03:35 那张图另起一轮时，
+// 「刚才在这儿的对话」里还带着那句话，于是 01:04:26 又答了同一个点。
+{
+  const older = [{ kind: 'private', from: '1', fromName: '先生', text: '想和你一起睡' }];
+  const now = [{ kind: 'private', from: '1', fromName: '先生', text: '[图片]' }];
+  const p = buildPrompt({ roomKey: 'private:1', messages: now, recent: [...older, ...now] });
+  ok('答过的别再答：有「刚才的对话」就有那句提醒', p.includes('别再答第二遍'));
+  ok('答过的别再答：那句话本身还在（不能把上下文删掉）', p.includes('想和你一起睡'));
+  const bare = buildPrompt({ roomKey: 'private:1', messages: now, recent: now });
+  ok('答过的别再答：没有更早的对话就不加这句', !bare.includes('别再答第二遍'));
 }
 
 // ── 咽回去的那句，下一拍要还给她 ────────────────────────
@@ -552,21 +709,63 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   }
 }
 
+// ── 叫停：段收了就当场掐，不等超时 ────────────────────────
+// 2026-10-26 22:24 那次：手动结束之后，底下那一轮没人管，一直跑到 300 秒上限
+// （又给了 60 秒宽限），烧掉一百四十万 token，还在和新一段抢同一张图——
+// tmp/ 里 ten-v11..v14 是它俩一起吐的。光「不发」不够，得让它停下来。
+{
+  const { HeadlessBrain } = await import('../src/brain/headless.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-selftest-abort-'));
+  try {
+    const beat = path.join(dir, 'beat.txt');
+    const fake = path.join(dir, 'fake-cli.mjs');
+    fs.writeFileSync(fake, [
+      "import fs from 'node:fs';",
+      `const beat = ${JSON.stringify(beat)};`,
+      "process.stdin.resume();",
+      "console.log(JSON.stringify({ type: 'session', sessionId: 'fake-abort' }));",
+      "setInterval(() => fs.appendFileSync(beat, 'x'), 80);",
+      "setTimeout(() => {}, 60000);",
+    ].join('\n'), 'utf8');
+    process.env.DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'selftest-key';
+    const brain = new HeadlessBrain({ node: process.execPath, cli: fake, workspace: dir, timeoutMs: 5000, graceMs: 1 });
+    const ctl = new AbortController();
+    const t0 = Date.now();
+    const p = brain.run({ prompt: '随便', signal: ctl.signal })
+      .then(() => ({ code: 'OK' }), (e) => ({ code: String(e?.code || ''), msg: String(e?.message || e) }));
+    await new Promise((r) => setTimeout(r, 400));
+    ctl.abort();
+    // 子进程真死了没有：它每 80ms 写一个字节，死了心跳就停。
+    // 必须趁这一轮还没回来就量——等它自己超时被杀掉，这个数永远是对的（假的绿）。
+    const beatLen = () => (fs.existsSync(beat) ? fs.readFileSync(beat, 'utf8').length : 0);
+    const n1 = beatLen();
+    await new Promise((r) => setTimeout(r, 500));
+    const n2 = beatLen();
+    const res = await p;
+    const took = Date.now() - t0;
+    check('叫停：错误码是 ABORTED', res.code, 'ABORTED');
+    ok('叫停：不等超时，几百毫秒就回来', took < 3000);
+    ok('叫停：子进程真的死了（心跳停了）', n2 - n1 <= 2);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 // ── 引用的是张图：路径得摆出来 ──────────────────────────
 // 19:11 他发了张图问「你知道我说的是哪一张吗」——被引用的图只写「[图片]」，
 // 她等于没看见。现在把落盘路径一起带进引用行，而且不截断。
 {
   const recent = [
-    { msgId: '100', name: '先生', text: '[图片]', imageFiles: ['E:/ws/data/images/a-0.jpg'] },
+    { msgId: '100', name: '先生', text: '[图片]', imageFiles: ['C:/ws/data/images/a-0.jpg'] },
     { msgId: '101', name: '先生', text: '看这张' },
   ];
   const q = resolveQuote({ replyId: '100' }, recent);
-  ok('引用图时带上落盘路径', Boolean(q && q.text.includes('E:/ws/data/images/a-0.jpg')));
+  ok('引用图时带上落盘路径', Boolean(q && q.text.includes('C:/ws/data/images/a-0.jpg')));
   ok('引用图不再只写 [图片]', Boolean(q && !q.text.includes('[图片]')));
   check('引用普通话原样返回', resolveQuote({ replyId: '101' }, recent).text, '看这张');
   check('引用捞不到返回 null', resolveQuote({ replyId: '999' }, recent), null);
 
-  const longPath = `（附图：${'E:/ws/data/images/'.repeat(3)}a-0.jpg）`;
+  const longPath = `（附图：${'C:/ws/data/images/'.repeat(3)}a-0.jpg）`;
   const long = `看这张 ${longPath}`;
   check('带路径的引用不截断', shortenQuote(long), long);
   check('普通长引用仍截到 60', shortenQuote('x'.repeat(100)).length, 60);
@@ -580,7 +779,7 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
 // 用 withFiles 把路径接上去——跟最近 50 条那条路一样能 read_image。
 {
   check('没图就原样返回', withFiles('看这张', []), '看这张');
-  check('空正文带图只留附图', withFiles('[图片]', ['E:/ws/q-0.jpg']), '（附图：E:/ws/q-0.jpg）');
+  check('空正文带图只留附图', withFiles('[图片]', ['C:/ws/q-0.jpg']), '（附图：C:/ws/q-0.jpg）');
   check('多张图去重占位', withFiles('[图片][图片]', ['a.jpg', 'b.gif']), '（附图：a.jpg；b.gif）');
   check('有字有图空格分开', withFiles('看这个[图片]', ['a.jpg']), '看这个 （附图：a.jpg）');
   check('正文为空也能拼', withFiles('', ['a.jpg']), '（附图：a.jpg）');
@@ -926,6 +1125,28 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('去重：并进先记的那条', dups[0].into, 'a');
   ok('去重：不相干的条目不动', kept.some((x) => x.id === 'c'));
   check('去重：约定一个字都不碰', kept.filter((x) => x.kind === '约定').length, 2);
+
+  // 2026-10-28：体检时模型把输出上限全花在思考上，一个字都没吐（turn/end 记的是
+  // max-tokens），原来这里解析空串得到 []，日志照写「体检 364 条 → 0/0/0/0」，
+  // 看着像没毛病，其实整轮白跑四分钟、九万 token。白卷必须记成白卷。
+  const blankNotes = {
+    active: () => ['月亮今天很圆', '冰箱里还有半盒草莓', '右脚的鞋带老松', '周四要交那份表',
+      '楼下修车铺关门了', '鲸鱼玩偶洗过一回', '屏幕有点脏', '窗台上的绿萝长新叶了'].map((text, i) => ({
+      id: 'nt_' + i, kind: '事实', weight: 2, at: '2026-10-28', text,
+    })),
+    get: () => null,
+    stale: () => {},
+    update: () => {},
+  };
+  const blankSaid = [];
+  const blankRes = await upkeep({
+    brain: { run: async () => ({ text: '   ' }) },
+    notes: blankNotes,
+    logger: (_tag, msg) => blankSaid.push(String(msg)),
+  });
+  ok('体检：脑子交白卷时返回 null', blankRes === null);
+  ok('体检：白卷要记一笔，别装成没毛病', blankSaid.some((s) => s.includes('白卷')));
+  ok('体检：白卷时不许写「压过时 0 / 改准 0」那行假账', !blankSaid.some((s) => s.includes('压过时')));
 }
 // ── 自由活动停表：他在跟她聊，这段时间就不该白烧 ──────────
 // 以前只是「这一拍让路」，他聊十分钟，她那半小时就少了十分钟——
@@ -944,8 +1165,8 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
     logger: () => {},
     room: 'private:1',
     roomState: () => (ownerBusy
-      ? { lastDir: 'in', lastTs: Date.now() }
-      : { lastDir: 'in', lastTs: Date.now() - 400000 }),
+      ? { lastDir: 'in', lastTs: Date.now(), lastInTs: Date.now() }
+      : { lastDir: 'in', lastTs: Date.now() - 400000, lastInTs: Date.now() - 400000 }),
   });
   const s0 = ft.start({ minutes: 30 }).status;
   check('停表：刚开始表在走', s0.paused, false);
@@ -960,6 +1181,265 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('停表：他安静了就继续', s2.paused, false);
   ok('停表：把停掉的那段时间还给她（顺延）', s2.endsAt > s1.endsAt);
   ft.stop('测试结束');
+}
+
+// ── 自由活动也会换会话：跟聊天一个尺子 ────────────────────
+// 2026-10-28 量到的：自由活动原来是「一整段共用一条会话」，越跑越长，单轮读到 334 万
+// token（一轮 9~10 步，每步重读一遍全量上下文）。聊天那条有 rotateAtTokens 管着，
+// 稳在 15~20 万；这条路以前根本没有这个机制。26 拍花了 1542 万，和 90 轮聊天一样贵。
+{
+  check('自由活动换会话：没到阈值不换', shouldRotateFree(100000, 250000), false);
+  check('自由活动换会话：正好到阈值就换', shouldRotateFree(250000, 250000), true);
+  check('自由活动换会话：超了当然换（334 万那种）', shouldRotateFree(3340958, 250000), true);
+  check('自由活动换会话：没配阈值按 6 万兜底', shouldRotateFree(70000, undefined), true);
+  check('自由活动换会话：读的数是脏的就当没超', shouldRotateFree(undefined, 250000), false);
+  const fsrc = fs.readFileSync(path.join(ROOT, 'src/body/freetime.mjs'), 'utf8');
+  ok('自由活动换会话：真接在拍子上了', fsrc.includes('shouldRotateFree(readTokens, rotateAt)'));
+  ok('自由活动换会话：超了就清空 #sid', fsrc.includes('this.#sid = null;'));
+  ok('自由活动换会话：阈值读的是跟聊天同一个配置', fsrc.includes('headless?.rotateAtTokens'));
+}
+
+// ── 他刚问过、她已经答过：自由活动不许再答一遍 ────────────
+// 2026-10-27 11:52 他问按不按条数挂表情。回话里已经答了（「那本鲸就不硬凑了」），
+// 可自由活动那一拍 11:56 又答了一遍——两条链各挂一条 session，互相看不见对方说过话。
+// 旧的停表判据看的是「最后一条消息」：她一回，最后一条就成了她的，判据当场失效，
+// 于是那一停立刻结束、下一拍照跑。要的是「他安静满这么久才算聊完」，那就得看他
+// 最后开口的时刻（lastInTs），不是最后一条消息的时刻。
+{
+  let ran = 0;
+  const ft = new FreeTime({
+    cfg: {
+      freeTime: {
+        beatMs: 60000, skipIfActiveMs: 300000, pauseWhileOwnerChats: true,
+        pauseCheckMs: 40, durationMs: 1800000, maxMessages: 3, permission: 'look',
+      },
+    },
+    brain: { run: async () => { ran += 1; return { text: '<done/>' }; } },
+    send: async () => {},
+    logger: () => {},
+    room: 'private:1',
+    // 他十秒前问过一句，她刚刚回过：最后一条是她的（out），他最后开口在 10 秒前
+    roomState: () => ({ lastDir: 'out', lastTs: Date.now(), lastInTs: Date.now() - 10000 }),
+  });
+  const s0 = ft.start({ minutes: 30 }).status;
+  await new Promise((r) => setTimeout(r, 2200));
+  const s1 = ft.status();
+  check('答过一遍：他刚开口过就还该停表（哪怕她刚回过）', s1.paused, true);
+  check('答过一遍：停了就真没叫她动手', ran, 0);
+  ok('答过一遍：停表把她这段往后顺延', s1.endsAt >= s0.endsAt);
+  ft.stop('测试结束');
+}
+
+// ── 自由活动的对话带「多久之前」，只取最近半小时 ─────────────
+// 2026-10-30 23:52：他那两句（23:42、23:44 关于墙）和两小时前的旧话并排摆着，
+// 读起来全是「刚才」，她绕着早已聊完的那件事又讲了两拍（23:52「那面墙没人让我画…」、
+// 23:54「把灯换成窗了…」）。
+// 现在每句前面写清多久之前，并且超过半小时的不进这一段——更早的不该被当成现场。
+{
+  const now = 1793374800000;
+  const mk = (msAgo, dir, text) => ({ ts: now - msAgo, dir, text });
+  const lines = recentTalk([
+    mk(2 * 3600_000, 'in', '两小时前那句'),
+    mk(25 * 60_000, 'out', '二十五分钟前那句'),
+    mk(30_000, 'in', '半分钟前那句'),
+  ], { windowMs: 30 * 60_000, limit: 12, now });
+  check('对话带时间：两小时前的不进来', lines.some((l) => l.includes('两小时前那句')), false);
+  check('对话带时间：半小时以内的都在', lines.length, 2);
+  check('对话带时间：写了「25 分钟前」', lines[0].includes('25 分钟前'), true);
+  check('对话带时间：刚说那句写「刚刚」', lines[1].includes('刚刚'), true);
+  check('对话带时间：谁说的还在', lines[0].startsWith('25 分钟前，你：'), true);
+  check('对话带时间：只留最后 N 条', recentTalk([
+    mk(1000, 'in', 'a'), mk(2000, 'in', 'b'), mk(3000, 'in', 'c'),
+  ], { windowMs: 30 * 60_000, limit: 2, now }).length, 2);
+  check('对话带时间：没时间戳的丢掉', recentTalk([{ dir: 'in', text: '没 ts' }], { now }).length, 0);
+  const longLine = recentTalk([mk(1000, 'out', '啊'.repeat(150))], { windowMs: 30 * 60_000, now })[0];
+  ok('对话带时间：削过的句子留一个「…」', longLine.endsWith('…') && longLine.includes('啊'.repeat(120)) && !longLine.includes('啊'.repeat(121)));
+  const shortLine = recentTalk([mk(1000, 'out', '一句短的')], { windowMs: 30 * 60_000, now })[0];
+  ok('对话带时间：没削的不多一个点', shortLine.endsWith('一句短的'));
+  const msrc = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok('对话带时间：roomState 真用上了它', msrc.includes('talk: recentTalk(list'));
+  ok('对话带时间：只取半小时（30 分钟）', msrc.includes('windowMs: 30 * 60 * 1000'));
+  const fsrc2 = fs.readFileSync(path.join(ROOT, 'src/body/freetime.mjs'), 'utf8');
+  ok('对话带时间：提示里说明了「每句前面是多久之前」', fsrc2.includes('每句前面是多久之前'));
+}
+
+// 2026-10-27 16:20 那次：他 16:14 说完，她 16:16 答完（回话那条链答了很久），
+// 16:20 自由那一拍按「他安静满 5 分钟」就醒了，插进去说了句跟她刚说过的正相反的话
+// （她说画了，那一拍说「图本鲸不画」）。只看他的时刻追不上两个人的对话：
+// 取两头晚的那个——他在说、或者她刚在回话里应过他，都算这段没散。
+// 但自由活动自己发的那些不算（否则她每拍都在刷新时钟，自由时间永远开不起来），
+// 那条在 main.mjs 的 roomState 里滤（e.free），这里用 lastTs 更新、lastOutTs 不动来代表。
+{
+  let ran = 0;
+  const now = Date.now();
+  const ft = new FreeTime({
+    cfg: {
+      freeTime: {
+        beatMs: 60000, skipIfActiveMs: 300000, pauseWhileOwnerChats: true,
+        pauseCheckMs: 40, durationMs: 1800000, maxMessages: 3, permission: 'look',
+      },
+    },
+    brain: { run: async () => { ran += 1; return { text: '<done/>' }; } },
+    send: async () => {},
+    logger: () => {},
+    room: 'private:1',
+    // 他六分多钟前说过（已经过了 5 分钟窗口），她二十秒前刚在回话里答完
+    roomState: () => ({ lastDir: 'out', lastTs: now - 20000, lastInTs: now - 400000, lastOutTs: now - 20000 }),
+  });
+  ft.start({ minutes: 30 });
+  await new Promise((r) => setTimeout(r, 2200));
+  const s = ft.status();
+  check('她刚答完：对话没散，这一拍还该停表', s.paused, true);
+  check('她刚答完：停了就真没叫她动手', ran, 0);
+  ft.stop('测试结束');
+}
+
+// 反过来：刚刚那条"最后一条消息"如果是自由活动自己发的，不算对话，该拍就拍。
+{
+  let ran = 0;
+  const now = Date.now();
+  const ft = new FreeTime({
+    cfg: { freeTime: { beatMs: 60000, skipIfActiveMs: 300000, durationMs: 1800000, maxMessages: 3, permission: 'look' } },
+    brain: { run: async () => { ran += 1; return { text: '<done/>' }; } },
+    send: async () => {},
+    logger: () => {},
+    room: 'private:1',
+    // 他十分钟前说过，她十分钟前也应过；现在这条最新的 out 是她自由活动自己发的
+    roomState: () => ({ lastDir: 'out', lastTs: now - 5000, lastInTs: now - 600000, lastOutTs: now - 600000 }),
+  });
+  ft.start({ minutes: 30 });
+  await new Promise((r) => setTimeout(r, 2600));
+  check('自由活动自己发的不算对话：表不该停', ft.status().paused, false);
+  ok('自由活动自己发的不算对话：拍照跑', ran > 0);
+  ft.stop('测试结束');
+}
+
+
+// 光有停表还不够：他安静满五分钟之后照样会拍，那一拍要是看不见「她刚在回话里答过」，
+// 还是会把同一件事再答一遍。所以每拍都把这个房间最近十几句带进去。
+{
+  let prompt = '';
+  const ft = new FreeTime({
+    cfg: { freeTime: { beatMs: 40, skipIfActiveMs: 0, durationMs: 600000, maxMessages: 3, permission: 'look' } },
+    brain: { run: async (o) => { prompt = String(o.prompt || ''); return { text: '<done/>' }; } },
+    send: async () => {},
+    logger: () => {},
+    room: 'private:1',
+    roomState: () => ({
+      lastDir: 'in', lastTs: Date.now() - 1000, lastInTs: Date.now() - 1000,
+      talk: ['他：按你喜欢的来吧', '你：那本鲸就不硬凑了'],
+    }),
+  });
+  ft.start({ minutes: 10 });
+  await new Promise((r) => setTimeout(r, 2600));  // start() 把第一拍排在 2 秒后
+  ok('看得见刚才：那一拍带着这个房间刚说过的话', prompt.includes('【这个房间刚才的对话】'));
+  ok('看得见刚才：他问过的那句在里面', prompt.includes('他：按你喜欢的来吧'));
+  ok('看得见刚才：她自己答过的也在里面', prompt.includes('你：那本鲸就不硬凑了'));
+  ok('看得见刚才：提醒她别再答一遍', prompt.includes('就别再答一遍'));
+  ft.stop('测试结束');
+}
+
+// ── 上一段的拍回来晚了：不许它替新的一段说话 ──────────────
+// 2026-10-26 22:33：两条开场白在 6 秒里都发出去了，日志里是两条「开场那句发出去了
+// （不占额度）」，两个不同的 session——同一间私聊连着响两声。想事情要一分多钟，
+// 回来时那一段可能已经收了、甚至已经开了新的一段：那种话属于旧段，不该开口。
+{
+  const said = [];
+  let calls = 0;
+  const ft = new FreeTime({
+    cfg: {
+      freeTime: {
+        beatMs: 60000, durationMs: 600000, maxMessages: 3, permission: 'look',
+        pauseWhileOwnerChats: false,
+      },
+    },
+    brain: {
+      run: async () => {
+        calls += 1;
+        const n = calls;
+        await new Promise((r) => setTimeout(r, 1200));
+        return { text: n === 1 ? '上一段的那句话' : '这一段的话' };
+      },
+    },
+    send: async (t) => { said.push(t); },
+    logger: () => {},
+    room: 'private:1',
+    roomState: () => ({ lastDir: 'in', lastTs: 0 }),
+  });
+  ft.start({ minutes: 10 });                        // 第一拍排在 2 秒后
+  await new Promise((r) => setTimeout(r, 2400));    // 这一拍已经在想了
+  ft.stop('测试：收掉这一段');
+  ft.start({ minutes: 10 });                        // 新的一段，第一拍同样 2 秒后
+  await new Promise((r) => setTimeout(r, 4400));    // 等两拍都回来
+  check('遗孤：上一段的那句话不发出去', said.includes('上一段的那句话'), false);
+  ok('遗孤：新一段的话照常说', said.includes('这一段的话'));
+  ft.stop('测试结束');
+}
+
+// ── 标记写在话里：是话，不是命令 ──────────────────────────
+// 2026-10-27 21:16：我给先生解释「那个十分钟的标记会被压成六百秒」，话里带着标记原文，
+// 结果整句被当成「去等」——消息没发出去，人还空停了十分钟。判据改成整句匹配。
+{
+  const said = [];
+  const logs = [];
+  let calls = 0;
+  const ft = new FreeTime({
+    cfg: {
+      freeTime: {
+        beatMs: 40, skipIfActiveMs: 0, durationMs: 600000, maxMessages: 9, permission: 'look',
+        pauseWhileOwnerChats: false,
+      },
+    },
+    brain: {
+      run: async () => {
+        calls += 1;
+        return { text: calls === 1 ? '那句里我写了 <wait:600/> 这样的标记，然后话就被吞了' : '<pass/>' };
+      },
+    },
+    send: async (t) => { said.push(String(t)); },
+    logger: (area, line) => { logs.push(`${area} ${line}`); },
+    room: 'private:1',
+    roomState: () => ({ lastDir: 'in', lastTs: 0 }),
+  });
+  ft.start({ minutes: 10 });
+  await new Promise((r) => setTimeout(r, 3000));   // 第一拍排在 2 秒后
+  ft.stop('测试结束');
+  ok('话里带标记：照常发出去', said.some((t) => t.includes('话就被吞了')));
+  check('话里带标记：标记不跟着发出去', said.some((t) => t.includes('<wait:')), false);
+  // 被当成「去等」时这一拍会提前 return，话也就不会走完发送那条路（日志里没有「第 N 拍」）。
+  ok('话里带标记：这一拍照常走完', logs.some((l) => l.includes('第 1 拍')));
+}
+
+// ── 段收了：底下还在跑的那一轮要当场叫停 ──────────────────
+// 只挡住它说话是不够的。22:24 手动结束之后，那一轮又跑了六分钟、烧了一百四十万
+// token；下一段一开始，两个人就同时改同一张图。所以收段时要把 signal 拉掉。
+{
+  let gotSignal = null;
+  const ft = new FreeTime({
+    cfg: {
+      freeTime: {
+        beatMs: 60000, durationMs: 600000, maxMessages: 3, permission: 'look',
+        pauseWhileOwnerChats: false,
+      },
+    },
+    brain: {
+      run: async ({ signal }) => {
+        gotSignal = signal;
+        await new Promise((r) => setTimeout(r, 2000));
+        return { text: '<pass/>' };
+      },
+    },
+    send: async () => {},
+    logger: () => {},
+    room: 'private:1',
+    roomState: () => ({ lastDir: 'in', lastTs: 0 }),
+  });
+  ft.start({ minutes: 10 });
+  await new Promise((r) => setTimeout(r, 2400));    // 这一拍已经在想了
+  ok('叫停：跑着的那一拍拿到了开关', Boolean(gotSignal) && gotSignal.aborted === false);
+  ft.stop('测试：收掉这一段');
+  ok('叫停：段一收，底下那一轮当场停', Boolean(gotSignal) && gotSignal.aborted === true);
+  await new Promise((r) => setTimeout(r, 600));
 }
 
 // ── 一轮没跑完 ────────────────────────────────────────────
@@ -1053,6 +1533,350 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('工具：规程也恒定全套', msrc2.includes('const rulesText = ruleOf(asGroup);'));
 }
 
+// ── 用量账本不许漏 ──────────────────────────────────────
+// 2026-10-28 用户看出面板数字比实际少近一半：原来只有两处记账（正常回话、自由活动），
+// aside / 冷场开口 / 等工具跑完的续接 / 体检 / 整理 / 交接纸条 / 筛表情全漏。
+// 现在改成在脑子外面套一层（meterRun），谁调 run 都记，kind 由调用方给。
+{
+  const src = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok('账本：主脑套了记账层', src.includes('meterRun(brain)'));
+  ok('账本：后台脑也套了', src.includes('meterRun(worker)'));
+  ok('账本：aside 单独记一种', src.includes("kind: 'aside'"));
+  ok('账本：冷场开口单独记一种', src.includes("kind: 'social'"));
+  ok('账本：等工具跑完的续接单独记一种', src.includes("kind: 'awaiting'"));
+  ok('账本：不再有两处各记一次的老写法', !src.includes('recordUsage'));
+  const fsrc = fs.readFileSync(path.join(ROOT, 'src/body/freetime.mjs'), 'utf8');
+  ok('账本：自由活动那一拍标了 free', fsrc.includes("kind: 'free'"));
+}
+
+// ── 筛表情：一批一次，别一张一读 ──────────────────────────
+// 2026-10-28 实测：一张一次 brain.run，单张 5.7 万 token，其中几乎全是系统提示词
+// 和工具定义，图片本身才几千。四张就是同一份说明读四遍。改成一批一次。
+{
+  const pending = [
+    { id: 'k1', abs: '/tmp/a.png', ctx: '笑死', from: '某人' },
+    { id: 'k2', abs: '/tmp/b.png' },
+  ];
+  const p = batchPrompt(pending);
+  ok('筛表情：一批的提示词里有两张的 id', p.includes('id=k1') && p.includes('id=k2'));
+  ok('筛表情：两张的路径都在', p.includes('/tmp/a.png') && p.includes('/tmp/b.png'));
+  ok('筛表情：旁边说的话也带上了', p.includes('笑死'));
+
+  const got = parseVerdicts(["看完了",
+    '{"id":"k1","verdict":"sticker","tags":["撒娇"],"when":"求夸"}',
+    '{"id":"k2","verdict":"screenshot","tags":[],"when":""}',
+  ].join('\n'));
+  check('筛表情：多行 JSON 都抠出来了', got.size, 2);
+  check('筛表情：k1 判成表情', got.get('k1')?.verdict, 'sticker');
+  check('筛表情：k2 判成截图', got.get('k2')?.verdict, 'screenshot');
+
+  const broken = parseVerdicts([
+    '{"id":"k1","verdict":"sticker"}',
+    '{"id":"k2", oops}',
+    '{"id":"k3","verdict":"other"}',
+  ].join('\n'));
+  check('筛表情：坏掉的那一行只丢那一张', broken.size, 2);
+  ok('筛表情：没被坏行连累', broken.has('k3'));
+
+  // 真跑一遍：四张只该有一次 brain.run
+  let runs = 0;
+  const seen = [];
+  const fake = {
+    pendingAll: async () => [1, 2, 3, 4].map((i) => ({ id: 'k' + i, abs: '/tmp/' + i + '.png' })),
+    approve: async (id) => seen.push(['ok', id]),
+    reject: async (id, why) => seen.push(['no', id, why]),
+  };
+  const res = await screenStickers({
+    brain: { run: async () => { runs += 1; return { text: [1, 2, 3, 4].map((i) => `{"id":"k${i}","verdict":"sticker","tags":["a"],"when":"b"}`).join('\n') }; } },
+    stickers: fake, logger: () => {}, maxOps: 4,
+  });
+  check('筛表情：四张只跑了一次脑子', runs, 1);
+  check('筛表情：四张都处理了', res.checked, 4);
+  check('筛表情：四张都收下', res.kept, 4);
+  check('筛表情：真落库了', seen.length, 4);
+
+  // 三档以外的判断（2026-10-31 真收到过 "comic-strip-3panels"）：
+  // 退回可以，但不能把模型现编的词当"类别"写进 reject，那会让档案看着比实际整齐。
+  const odd = [];
+  const res2 = await screenStickers({
+    brain: { run: async () => ({ text: '{"id":"k1","verdict":"comic-strip-3panels","tags":[],"when":""}' }) },
+    stickers: {
+      pendingAll: async () => [{ id: 'k1', abs: '/tmp/1.png' }],
+      approve: async (id) => odd.push(['ok', id]),
+      reject: async (id, why) => odd.push(['no', id, why]),
+    },
+    logger: () => {}, maxOps: 1,
+  });
+  check('筛表情：三档以外的判断照样退回', res2.rejected, 1);
+  ok('筛表情：理由写明是未识别，不冒充类别', String(odd[0]?.[2] || '').startsWith('未识别判断：'));
+}
+
+// ── 拼成联络表：一张图看完一批 ──────────────────────────
+// 逐张 read_image 一轮四张就是四张图；拼成一张 384 一格的联络表，一次看完。
+{
+  const out = path.join(os.tmpdir(), `qad-sheet-${Date.now()}.png`);
+  ok('拼图：空名单不拼', makeSheet([], out) === null);
+  ok('拼图：路径都不存在就不拼（交给调用方退回逐张）', makeSheet([{ abs: out + '.nope.png' }], out) === null);
+  ok('拼图：脚本在仓库里', fs.existsSync(path.join(ROOT, 'tools', 'pending-sheet.py')));
+
+  const p = batchPrompt([{ id: 'k1', abs: '/tmp/a.png' }, { id: 'k2', abs: '/tmp/b.png' }], '/tmp/sheet.png');
+  ok('拼图：有联络表就只给一个路径', p.includes('/tmp/sheet.png') && !p.includes('一条路径都没有'));
+  ok('拼图：提示词说清一格一张、角上有 id', p.includes('格子左下角印着这张的 id'));
+  ok('拼图：两张的 id 还是要列出来', p.includes('k1') && p.includes('k2'));
+  const noSheet = batchPrompt([{ id: 'k1', abs: '/tmp/a.png' }]);
+  ok('拼图：没拼成还是逐张给路径', noSheet.includes('read_image 打开它') && noSheet.includes('/tmp/a.png'));
+
+  // 切过、没切开的那几张：脚本量出来的数必须走到提示词里。
+  // 2026-11-01 之前这条路是静默的——JSON 出了，没人接，模型只看见表上一条横带。
+  const u = batchPrompt([{ id: 'k1', abs: '/tmp/a.png' }], {
+    path: '/tmp/sheet.png',
+    thin: [],
+    uncut: [{ id: 'k0357', abs: '/tmp/t.jpg', reason: 'uneven',
+      detail: { cut_bands: [{ y: 300, h: 66, pct: 3.4 }], seg_hs: [157, 500, 824], seg_ratio: 5.25 } }],
+  });
+  ok('切不开：提示词里带上了量到的数', u.includes('1 条缝切出 3 段') && u.includes('差 5.25 倍'));
+  ok('切不开：原图路径给了', u.includes('/tmp/t.jpg'));
+  ok('切不开：不出现编出来的理由', !u.includes('缝落在内容里'));
+  ok('切不开：没缝的那张不占一行（人家本来就是一整张）',
+    !batchPrompt([{ id: 'k1', abs: '/tmp/a.png' }], { path: '/tmp/s.png', thin: [], uncut: [] })
+      .includes('试过按格切'));
+
+  check('切不开：not_strip 说中位段高', uncutNote({ reason: 'not_strip',
+    detail: { cut_bands: new Array(28).fill({ y: 1, h: 12, pct: 0.6 }), median_seg_h: 65, img_h: 1920 } }),
+  '28 条缝切出 29 段，段高中位数 65px（图高 1920 的 3.4%，门槛 10%）——像文字长图/截图，不像分格');
+  // 缝数与段数必须对得上账：seg_hs 只装过了 min_h 的段，配上全部缝数就成了一句
+  // 算不通的话（45 张 uneven 里 15 张这样，k0357 写的是"4 条缝切出 3 段"）。
+  check('切不开：uneven 丢了薄边时把两笔账都说清', uncutNote({ reason: 'uneven',
+    detail: { cut_bands: new Array(4).fill({ y: 300, h: 66, pct: 3.4 }), seg_hs: [157, 500, 824],
+      seg_hs_raw: [157, 30, 500, 824, 40], seg_ratio: 5.25 } }),
+  '4 条缝把图分成 5 段，够高的 3 段（其余 2 段不到门槛），高 157..824（差 5.25 倍，门槛 2.5），最宽一条平带 66px 占 3.4% 图高');
+  check('切不开：uneven 没丢薄边时话短一点', uncutNote({ reason: 'uneven',
+    detail: { cut_bands: [{ y: 300, h: 66, pct: 3.4 }], seg_hs: [157, 500],
+      seg_hs_raw: [157, 500], seg_ratio: 3.18 } }),
+  '1 条缝切出 2 段，高 157..500（差 3.18 倍，门槛 2.5），最宽一条平带 66px 占 3.4% 图高');
+  check('切不开：ok 不装成"没切开"', uncutNote({ reason: 'ok', detail: {} }), '按格切开了');
+  check('切不开：too_small 报最高那段、几段够高', uncutNote({ reason: 'too_small',
+    detail: { cut_bands: new Array(2).fill({ y: 1, h: 10, pct: 0.5 }),
+      img_h: 878, seg_hs_raw: [32, 794, 52], n_fit: 1 } }),
+  '2 条缝切出 3 段，只有 1 段够高：最高 794px 占图高 90.4%（门槛 6%），其余 2 段都不到');
+  check('切不开：too_small 一段都不够高时也说数', uncutNote({ reason: 'too_small',
+    detail: { cut_bands: [{ y: 1, h: 10, pct: 0.5 }],
+      img_h: 1000, seg_hs_raw: [40, 45], n_fit: 0 } }),
+  '1 条缝切出 2 段，最高的才 45px 占图高 4.5%（门槛 6%），一段都不够');
+  check('切不开：too_small 没有明细时不编数',
+    uncutNote({ reason: 'too_small', detail: {} }),
+    '没切开（too_small），段高没递过来——这条别当数看');
+  check('切不开：没见过的原因照抄，不编',
+    uncutNote({ reason: 'bleh', detail: {} }), '没切开（bleh）');
+}
+
+// ── 兴趣账本：CLI 记的那一笔，桥得看得见 ────────────────────
+// 2026-10-30 10:5x 抓到的：自由活动那一拍的提示里三件事全写「1 天前做过」，实际分别是
+// 1.7 / 5.3 / 7.8 小时前——账本只在开机读一次盘，而 `node scripts/interests.mjs did …`
+// 是另一个进程写的。这类错不报错，只是让她一遍遍被推荐刚做完的事。
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'interests-'));
+  const file = path.join(dir, 'interests.json');
+  const t0 = Date.now();
+  const base = {
+    items: [{ id: 'in_a', name: '看海', order: 0, count: 1, lastAt: t0 - 3 * 86400000, feelings: [] }],
+  };
+  fs.writeFileSync(file, JSON.stringify(base), 'utf8');
+
+  const store = new InterestStore({ file });
+  check('兴趣：开机读到的是 3 天前', Math.round(store.idleDays(store.get('看海'))), 3);
+
+  // 模拟另一个进程刚刚记了一笔
+  const t1 = t0 + 5000;
+  fs.writeFileSync(file, JSON.stringify({ items: [{ ...base.items[0], count: 2, lastAt: t1 }] }), 'utf8');
+  fs.utimesSync(file, new Date(t1), new Date(t1)); // 钉死 mtime，别靠写入快慢
+
+  check('兴趣：CLI 记的一笔，桥不重启也看得见（count）', store.get('看海')?.count, 2);
+  check('兴趣：刚做过的那件不再算 3 天前', Math.round(store.idleDays(store.get('看海'))), 0);
+  check('兴趣：挑的时候用的也是新数', store.pick(1)[0]?.idleDays, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── 探针：现在跑的是不是最新那份 ──────────────────────────
+// 2026-11-01 一天里三次"改了 ≠ 生效"（13:09 改宽限期、17:21 装空图闸、18:03 递 thin），
+// 每次都是同一个动作：改完、自检绿、说"好了"——而桥还开着开机时那份。这个探针替我
+// 做那次比较，所以它自己得先对：最后一条启动记录、UTC 时间戳、以及"新"的边界。
+{
+  const log = [
+    '[2026-11-01T03:31:08.700Z] 桥已启动（pid 36408）',
+    '[2026-11-01 11:31:08] [snowluma] 启动 外部的那份',
+    '[2026-11-01T12:14:50.312Z] 桥已启动（pid 19320）',
+  ].join('\n');
+  const start = findStart(log);
+  check('探针：取的是最后一条启动记录（pid）', start?.pid, 19320);
+  check('探针：带 Z 的时间戳读成了同一时刻', start?.at, Date.parse('2026-11-01T12:14:50.312Z'));
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stale-'));
+  const older = path.join(dir, 'older.mjs');
+  const newer = path.join(dir, 'newer.js');
+  fs.writeFileSync(older, '// 启动前改的\n', 'utf8');
+  fs.writeFileSync(newer, '// 启动后改的\n', 'utf8');
+  fs.utimesSync(older, new Date(start.at - 60000), new Date(start.at - 60000));
+  fs.utimesSync(newer, new Date(start.at + 60000), new Date(start.at + 60000));
+  check('探针：启动之后改过的文件被点名', staleFrom(dir, start.at).map((x) => path.basename(x.file)), ['newer.js']);
+  check('探针：启动之前改过的不算', staleFrom(dir, start.at + 120000).length, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  // 自检收尾那句话：只在"真旧了 + 那个进程还活着"时才开口。喂假结果，不碰真进程。
+  const fakeStale = { verdict: 'stale', pid: 19320, pidAlive: true, startedAt: start.at, stale: [{ file: path.join(ROOT, 'src', 'a.mjs'), mtime: 0 }] };
+  check('探针：旧了就先答一句「这份还没生效」', staleNote(fakeStale)?.includes('这份还没生效'), true);
+  // 桥没起（pidAlive 不是 true）、或者判不了：一句话都不说。宁可闭嘴，也不冤枉桥。
+  check('探针：桥没起或者判不了时不说话',
+    [staleNote({ ...fakeStale, pidAlive: null }), staleNote({ ...fakeStale, pidAlive: false }), staleNote({ verdict: 'fresh', pid: 1, pidAlive: true, startedAt: start.at, stale: [] }), staleNote({ verdict: 'unknown', reason: 'x' })],
+    [null, null, null, null]);
+}
+
+// ── 看门人：桥自己那一半 ────────────────────────────────
+// 探针得有人记得问；桥不问，所以夜里那句话永远没人说。这里验的是"它自己会说"：
+// 启动之后改过的点名、同一个版本只说一次、再改一版再说、比启动早的一个字不说。
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stale-watch-'));
+  const file = path.join(dir, 'x.mjs');
+  const at = Date.parse('2026-11-01T12:14:50.312Z');
+  fs.writeFileSync(file, '// 启动后改的\n', 'utf8');
+  fs.utimesSync(file, new Date(at + 60000), new Date(at + 60000));
+  const said = [];
+  const w = createStaleWatch({ dir, logger: (tag, msg) => said.push(`${tag}:${msg}`), sinceMs: at });
+  check('看门人：启动之后改过的文件，它自己点名', w.scan().map((x) => path.basename(x.file)), ['x.mjs']);
+  check('看门人：点的是「这份还没生效」', said.length === 1 && said[0].startsWith('stale:这份还没生效'), true);
+  check('看门人：同一个版本只说一次', [w.scan().length, said.length], [0, 1]);
+  fs.utimesSync(file, new Date(at + 120000), new Date(at + 120000));
+  check('看门人：又改了一版就再说一句', w.scan().length, 1);
+
+  const quiet = [];
+  const before = createStaleWatch({ dir, logger: (...x) => quiet.push(x), sinceMs: at + 10 * 60000 });
+  check('看门人：比启动更晚的时刻不算，一个字不说', [before.scan().length, quiet.length], [0, 0]);
+
+  const t = createStaleWatch({ dir, logger: () => {}, sinceMs: at, intervalMs: 60000 });
+  t.start();
+  const running = Boolean(t.timer);
+  t.stop();
+  check('看门人：定时器能开能停', [running, t.timer], [true, null]);
+
+  // 2026-11-02：余量的方向写反过一次。危险区不在 since 之后，而在 since **之前**那几秒——
+  // 进程刚起来、src/ 还没 import 完，这段时间改的文件，读到的说不好是哪一版。
+  // 写成 sinceMs + tolerance 就等于主动放过这一段，正好是让刚改过的冒充已生效。
+  const edge = path.join(dir, 'edge.mjs');
+  fs.writeFileSync(edge, '// edge', 'utf8');
+  fs.utimesSync(edge, new Date(at + 500), new Date(at + 500));
+  check('看门人：启动后半秒改的也算没生效（余量往前提）',
+    staleFrom(dir, at).some((x) => path.basename(x.file) === 'edge.mjs'), true);
+  check('看门人：判据不许再写成 sinceMs + tolerance',
+    fs.readFileSync(path.join(ROOT, 'src', 'util', 'stale-watch.mjs'), 'utf8').includes('sinceMs + tolerance'), false);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── 媒体清理：视频得显式给扩展名 ────────────────────────
+// 2026-11-02 审计：main.mjs 拿只认图片扩展名的清理函数去清 data/videos/，
+// .mp4 一个都不匹配，视频清理从上线起就是空转（堆到 562MB / 481 个文件）。
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-media-'));
+  const write = (name, bytes) => fs.writeFileSync(path.join(dir, name), Buffer.alloc(bytes));
+  write('a.png', 1000);
+  write('b.mp4', 2000);
+  write('c.webm', 500);
+
+  const keep = cleanupImages(dir, { retainDays: 0, maxMb: 1000 });
+  ok('清理：默认只认图片，mp4/webm 不碰', fs.existsSync(path.join(dir, 'b.mp4')) && fs.existsSync(path.join(dir, 'c.webm')));
+  ok('清理：默认把图算进来了（a.png 还在，因为没超预算）', keep.bytes > 0 && fs.existsSync(path.join(dir, 'a.png')));
+
+  const v = cleanupImages(dir, { retainDays: 0, maxMb: 0.001, match: VIDEO_RE });
+  ok('清理：给 VIDEO_RE 才会动视频', v.removed >= 1 && !fs.existsSync(path.join(dir, 'b.mp4')));
+  ok('清理：视频正则不误伤图片', fs.existsSync(path.join(dir, 'a.png')));
+
+  ok('清理：图片正则认 png', IMAGE_RE.test('x.PNG'));
+  ok('清理：视频正则认 mp4', VIDEO_RE.test('x.MP4'));
+  ok('清理：视频正则不认 png', !VIDEO_RE.test('x.png'));
+
+  const msrc3 = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok('清理：main.mjs 清视频时真传了 VIDEO_RE', /cleanupImages\(videoDir,\s*\{\s*\.\.\.\(cfg\.videos/.test(msrc3) && msrc3.includes('match: VIDEO_RE'));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── 历史段：不滑窗，只留保险丝 ──────────────────────────
+// 2026-11-01 查出群聊 433 轮里 87 轮每轮新输入 12–18 万，47% 的钱花在这上面。
+// 根因是 slice(-14)：每来一条新消息整段往前挪一格，缓存按前缀匹配，一挪全断。
+{
+  const mk = (n, len) => Array.from({ length: n }, (_, i) => ({ dir: i % 2 ? 'out' : 'in', from: '1', text: 'x'.repeat(len) + '#' + i }));
+  const small = mk(5, 400);
+  ok('历史段：没超预算就原样放（一条都不切）', fitHistory(small, { maxTokens: 100000 }).length === 5);
+  const big = mk(60, 8000);
+  const cut = fitHistory(big, { maxTokens: 100000 });
+  ok('历史段：超预算会裁', cut.length < 60);
+  ok('历史段：最新的那条留着', cut.length > 0 && cut[cut.length - 1].text.endsWith('#59'));
+  ok('历史段：最旧的被丢掉了', cut.length > 0 && !cut.some((m) => m.text.endsWith('#0')));
+  ok('历史段：空数组给空数组', fitHistory([]).length === 0);
+  ok('历史段：不是数组也不炸', fitHistory(null).length === 0);
+  ok('历史段：保险丝是 30 万', HISTORY_MAX_TOKENS === 300000);
+  ok('粗估：中文按 1.6 字符一个 token', roughTokens('一'.repeat(160)) === 100);
+  ok('粗估：空串是 0', roughTokens('') === 0);
+  const psrc = fs.readFileSync(path.join(ROOT, 'src/body/prompt.mjs'), 'utf8');
+  ok('历史段：不再按条数滑窗（没有 older.slice(-14)）', !psrc.includes('older.slice(-14)'));
+  ok('历史段：真挂上了 fitHistory', psrc.includes('renderTranscript(fitHistory(older))'));
+  const m500 = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok('历史段：读的条数放宽到 500（不然短句房间永远涨不满）', m500.includes('readRecent({ room: roomKey, limit: 500 })'));
+}
+
+// ── 门牌：挂的命令、点名的脚本，文件都得真在 ────────────────
+// 2026-10-29 晚：src/body/rules.mjs 早就删了，package.json 还挂着 probe:rules、
+// docs/scripts.md 还列着它——370 道闸一道都没拦。它们守的是"跑起来对不对"，
+// 而没人跑的命令不会报错，它只是烂着。门牌也是一种承诺，得有人守。
+// **这一段必须留在最后**：它拿 pass + 1 报自己的总数，后面再插检查它数不到——
+// 2026-11-02 凌晨加探针时报的项数就少算了 4 项，而它照样绿。
+{
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const cmds = Object.entries(pkg.scripts || {});
+  const dangling = [];
+  for (const [name, cmd] of cmds) {
+    for (const m of String(cmd).matchAll(/node\s+(?:\.\/)?([\w./-]+\.(?:mjs|cjs|js))/g)) {
+      if (!fs.existsSync(path.join(ROOT, m[1]))) dangling.push(`${name} → ${m[1]}`);
+    }
+  }
+  ok(`门牌：package.json 挂的 ${cmds.length} 条命令都指向真文件${dangling.length ? `（缺：${dangling.join('、')}）` : ''}`, dangling.length === 0);
+
+  const doc = fs.readFileSync(path.join(ROOT, 'docs', 'scripts.md'), 'utf8');
+  // 文档里有 `node scripts/xxx.mjs` 这种占位名，不当真文件查
+  const named = new Set([...doc.matchAll(/node\s+scripts\/([\w.-]+\.mjs)/g)]
+    .map((m) => m[1])
+    .filter((f) => !/^x+\.mjs$/i.test(f)));
+  const gone = [...named].filter((f) => !fs.existsSync(path.join(ROOT, 'scripts', f)));
+  ok(`门牌：docs/scripts.md 点名的 ${named.size} 个脚本都还在${gone.length ? `（缺：${gone.join('、')}）` : ''}`, gone.length === 0);
+
+  // 反过来也得守：前面的判据只查「写的都在」，不查「在的都写了」。新添一个脚本却
+  // 忘了上文档，门牌上就少一块，而 370 道闸会一齐报绿——少写不是错，但它让人以为数全了。
+  const onDisk = fs.readdirSync(path.join(ROOT, 'scripts')).filter((f) => f.endsWith('.mjs'));
+  const unlisted = onDisk.filter((f) => !named.has(f)).sort();
+  // 占位名 xxx.mjs 只是示例，不该被当成漏写的脚本
+  ok(`门牌：scripts/ 里的 ${onDisk.length} 个脚本都在 docs/scripts.md 上${unlisted.length ? `（没写：${unlisted.join('、')}）` : ''}`,
+    unlisted.length === 0);
+
+  // 第四种谎：把声明本身删掉。前两条判据写的是「不匹配就算过」，所以改个说法、删掉
+  // 半行，闸就悄悄没了，还一路报全过——会烂的门牌不可怕，会自己消失的闸才可怕。
+  // 声明在不在，也得有人守。
+  const claimed = doc.match(/共\s*(\d+)\s*个/);
+  const claimTests = doc.match(/scripts\/selftest\.mjs`\s*\|\s*(\d+)\s*项/);
+  ok(`门牌：docs/scripts.md 两处声明都还在（脚本体数${claimed ? '在' : '缺'}、自测项数${claimTests ? '在' : '缺'}）`,
+    Boolean(claimed) && Boolean(claimTests));
+
+  // 文档自己报的数也得对：写「共 23 个」而正文列了 28 个，就是门牌上的第二个谎
+  ok(`门牌：docs/scripts.md 写的数对得上正文（写 ${claimed ? claimed[1] : '?'} 个，实列 ${named.size} 个）`,
+    !claimed || Number(claimed[1]) === named.size);
+
+  // 第三种谎：文档里替自检报的项数。这个数每加一条测试就变，所以只能自己数自己——
+  // 本条也算一项，故 total = pass + 已失败的 + 1。2026-10-29 晚才发现原先只写 pass + 1：
+  // 一旦前面有别的项红了，总数就少报，正好在已经出事的运行里报一个假数字。
+  const total = pass + fails.length + 1;
+  ok(`门牌：docs/scripts.md 报的自测项数对得上（写 ${claimTests ? claimTests[1] : '?'} 项，本次 ${total} 项）`,
+    !claimTests || Number(claimTests[1]) === total);
+}
+
 // ── 结果 ────────────────────────────────────────────────
 if (fails.length) {
   console.log(`✗ ${fails.length} 个失败 / ${pass} 个通过\n`);
@@ -1060,3 +1884,10 @@ if (fails.length) {
   process.exit(1);
 }
 console.log(`✓ ${pass} 项全过`);
+
+// 绿了之后先别急着说"好了"：这些项验的是盘上这份代码，而现在跑着的桥可能还是
+// 开机时那份。自检跑完正是我最容易说出"好了"的一刻，所以让它在同一刻替我先答一句。
+// 不是一项检查，不参与计数，也不改退出码——它只说事实，判不了或者桥没起就闭嘴。
+const note = staleNote(assess());
+if (note) console.log(`\n  ⚠ ${note}\n    （npm run probe:stale 看全名单；重启桥之后这句会自己消失）`);
+

@@ -98,16 +98,23 @@ const TIMEOUT_GRACE_MS = 60_000;
 // 多久之内有过事件算「还在动」。比宽限还长就没意义了，所以同一个数。
 const FRESH_MS = TIMEOUT_GRACE_MS;
 
-/** 连子进程一起杀：Windows 下  只杀爹。 */
+/** 连子进程一起杀：Windows 下  只杀爹。返回 true 表示"确认杀掉了或本来就不在了"。 */
 function killTree(child) {
-  if (!child || child.killed) return;
+  if (!child) return true;
+  if (child.exitCode !== null || child.signalCode !== null) return true;
   try {
     if (process.platform === 'win32' && child.pid) {
-      spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-    } else {
-      child.kill('SIGKILL');
+      const r = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      // 0 = 掐掉了；128 = 系统里已经找不到这个 pid。128 只说明"这个 pid 没了"，
+      // 不代表它留下的东西也没了——2026-10-27 实测量过：父进程先退出、孙进程是 detached 起的，
+      // /T 就收不到它（心跳照跳）。所以 128 只是"没什么可掐的"，别读成"底下干净了"。
+      // 别的退出码（拒绝访问之类）才是没掐死——2026-10-26 22:33 那次超时之后那个进程还在跑，
+      // 当时这一层什么都不回报，外面只能等到下一段发现"两个我在改同一个文件"才知道。
+      return r.status === 0 || r.status === 128;
     }
-  } catch { /* ignore */ }
+    child.kill('SIGKILL');
+    return true;
+  } catch { return false; }
 }
 
 export class HeadlessBrain {
@@ -145,11 +152,12 @@ export class HeadlessBrain {
   }
 
   /**
-   * @param {{prompt: string, sessionId?: string|null, onEvent?: (ev:object)=>('abort'|void)}} input
+   * @param {{prompt: string, sessionId?: string|null, onEvent?: (ev:object)=>('abort'|void), signal?: AbortSignal}} input
    *   onEvent 每收到一个 NDJSON 事件就同步调一次；返回 'abort' 就当场掐断这一轮。
+   *   signal 一 abort 就立刻连子进程树一起掐（不等下一个事件）。
    * @returns {Promise<{text: string, sessionId: string|null}>}
    */
-  async run({ prompt, sessionId = null, onEvent = null, profile = null, model = null }) {
+  async run({ prompt, sessionId = null, onEvent = null, profile = null, model = null, signal = null }) {
     const key = this.#apiKey();
     if (!key) {
       throw new Error(`找不到 ${this.cfg.apiKeyEnv}：环境变量没有，${this.cfg.credentialsFile} 里也没有`);
@@ -196,7 +204,7 @@ export class HeadlessBrain {
     this.running += 1;
     const startedAt = Date.now();
     try {
-      const result = await this.#spawn(args, String(prompt ?? ''), key, onEvent, extraEnv);
+      const result = await this.#spawn(args, String(prompt ?? ''), key, onEvent, extraEnv, signal);
       // 退出码非 0 但 final 已到的那轮：结果照用，但得在日志里留一行，别让它悄悄过去
       if (result.exitWarn) this.logger?.('brain', result.exitWarn);
       this.logger?.(
@@ -210,7 +218,7 @@ export class HeadlessBrain {
     }
   }
 
-  #spawn(args, prompt, key, onEvent = null, extraEnv = {}) {
+  #spawn(args, prompt, key, onEvent = null, extraEnv = {}, signal = null) {
     return new Promise((resolve, reject) => {
       const child = spawn(this.cfg.node, args, {
         cwd: this.cfg.workspace,
@@ -251,10 +259,13 @@ export class HeadlessBrain {
 
       let timer = null;
       let graced = false;
+      let onAbort = null;
       const finish = (fn, value) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        // 摘掉 abort 监听：不然一段里收掉的拍越攒越多，每一条都还挂在同一个 signal 上
+        if (onAbort && signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* ignore */ } }
         fn(value);
       };
 
@@ -271,7 +282,9 @@ export class HeadlessBrain {
           return;
         }
         // 连子进程树一起掐：它可能拉起了 SD 这种大程序，只杀爹会剩孤儿占着端口
-        killTree(child);
+        if (!killTree(child)) {
+          this.logger?.('brain', '掐进程没确认成功（taskkill 非 0）——它要是还活着，下一拍会和它并排跑，别当它已经走了');
+        }
         const where = lastEventKind
           ? `最后一条事件 ${lastEventKind} 在 ${Math.round(stall / 1000)}s 前，共 ${eventCount} 条 / ${Math.round(stdoutBytes / 1024)}KB`
           : `一条事件都没收到（0KB），卡在起进程或读 prompt 那一步`;
@@ -284,6 +297,22 @@ export class HeadlessBrain {
       };
 
       timer = setTimeout(deadline, this.cfg.timeoutMs);
+
+      // 外面叫停（自由活动那一段收了）：不等下一个事件，也不等超时，当场连树掐掉。
+      // 为什么需要：段收了之后 #finish 只清了定时器，底下这一轮会一直跑到 300 秒上限——
+      // 2026-10-26 22:24 那次它跑了六分钟、烧掉一百四十万 token，还和新一段抢同一张图。
+      if (signal) {
+        onAbort = () => {
+          if (!killTree(child)) {
+            this.logger?.('brain', '叫停时掐进程没确认成功（taskkill 非 0）——那一轮可能还在底下跑');
+          }
+          const e = new Error('这一轮被叫停（这一段已经收了）');
+          e.code = 'ABORTED';
+          finish(reject, e);
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       const handleLine = (line) => {
         const s = line.trim();

@@ -72,9 +72,15 @@ export function createRouter({ cfg, now = () => Date.now(), random = Math.random
     const c = socialCfg();
     touch(key);
 
+    // @ 和「叫名字」分成两个开关：面板上写着「@ 我 必回」「叫名字 必回」，
+    // 但以前两个都没人读，只有合并后的 atMe 一个判据（2026-11-02 审计发现）。
     if (msg.atMe) {
-      enterActive(key);
-      return { speak: true, reason: 'called-me' };
+      const g = cfg.group || {};
+      const allowed = msg.realAt === true ? g.speakOnAt !== false : g.speakOnName !== false;
+      if (allowed) {
+        enterActive(key);
+        return { speak: true, reason: 'called-me' };
+      }
     }
 
     const text = String(msg.text || '').toLowerCase();

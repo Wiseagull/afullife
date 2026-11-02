@@ -76,7 +76,12 @@ export function normalizeEvent(raw, { selfId = '', selfNames = [] } = {}) {
     images,
     videos,
     at: Number(raw.time || Math.floor(Date.now() / 1000)),
+    // atMe 是「被点了名」的合并口径（真 @ 或者叫了她的名字），老代码都看这个。
+    // realAt / calledMe 分开留，是为了让面板上「@ 我」「叫名字」两个开关各自管各自的事
+    // ——原来两个开关声明了却没人读（2026-11-02 审计发现）。
     atMe: atMe || calledByName,
+    realAt: atMe === true,
+    calledMe: calledByName === true,
     // 引用：只留被引用那条的 id，正文由调用方去历史里捞
     replyId: replySeg ? String(replySeg?.data?.id ?? '') : '',
     hasForward,
@@ -87,7 +92,10 @@ export function normalizeEvent(raw, { selfId = '', selfNames = [] } = {}) {
 /** 把一串事件渲染成给脑子看的对话记录（纯文本）。 */
 export function renderTranscript(events) {
   return events.map((e) => {
-    const who = e.name || e.from || '?';
+    // 她自己说出去的（dir:'out'）事件没带 name —— 以前这里落到 '?'，
+    // 于是她回看【刚才在这儿的对话】时，自己的话全是一行行「?: ……」，
+    // 认不出哪句是自己说的（2026-10-28 01:05 她把一句垫话当成了别人替她说的）。
+    const who = e.dir === 'out' ? (e.name || '我') : (e.name || e.from || '有人');
     // 编号：她想引着某句回时，用 [[reply:编号]] 指过去
     const num = e.idx ? `#${e.idx} ` : '';
     // 引用：他在回哪一句，得摆在她眼前，不然她只能猜“这句是冲谁来的”

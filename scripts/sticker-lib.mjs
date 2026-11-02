@@ -9,12 +9,17 @@
 //   node scripts/sticker-lib.mjs pickup <图片路径> [--when=群里有人装逼] [--from=群123456789] [--tags=无语,翻白眼]
 //   node scripts/sticker-lib.mjs tag <id> --tags=撒娇,困 [--when=…]
 //   node scripts/sticker-lib.mjs find [--tags=无语] [--text=装逼] [--todo]   # --todo 只列还没分类的
+//   node scripts/sticker-lib.mjs pending                          # 还有哪些等着看
+//   node scripts/sticker-lib.mjs approve <id> --tags=… [--when=…]  # 自己看完，收下
+//   node scripts/sticker-lib.mjs reject <id> [--reason=…]         # 看完判不是，挪去 reject/ 留档
 //   node scripts/sticker-lib.mjs use <id>
 //   node scripts/sticker-lib.mjs drop <id>
 //   node scripts/sticker-lib.mjs stats                            # 多少张、多大
 //   node scripts/sticker-lib.mjs prune [--count=300] [--mb=200] [--dry]  # 满了清用得最少的
 //   node scripts/sticker-lib.mjs screen [--max=4]                 # 把候选过一遍眼，决定收不收
+//   node scripts/sticker-lib.mjs sheet [--max=16]                 # 只把候选拼成联络表，路径给我，我自己看
 //   node scripts/sticker-lib.mjs dedupe [--dry]                   # 按内容找重复，后收的标「重复」
+//   node scripts/sticker-lib.mjs crops                            # 退回的图里哪些标了「可裁：第 N 格」
 //   node scripts/sticker-lib.mjs where                            # 现在是谁在写库（桥 / 本地）
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -142,6 +147,75 @@ if (cmd === 'pending') {
   const list = s.items.filter((i) => i.pending === true);
   console.log(`${list.length} 张等着看`);
   for (const it of list) console.log(`  ${it.id}  ${Math.round(it.bytes / 1024)}KB  ${it.ctx || '(没留语境)'}`);
+  process.exit(0);
+}
+
+// 裁一裁：reject 档案里带着「可裁：第 N 格」的，图没删，还在 data/stickers/reject/ 躺着。
+// 2026-11-01：筛子以前只退整张、不留这句话，等于顺手把那格也扔了（k1337 那张三格漫画）。
+if (cmd === 'crops') {
+  const dir = path.join(cfg.dataDir || path.join(ROOT, 'data'), 'stickers');
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => /^reject-.*\.jsonl$/.test(f)).sort() : [];
+  const hits = [];
+  for (const f of files) {
+    for (const line of fs.readFileSync(path.join(dir, f), 'utf8').split('\n')) {
+      if (!line.includes('可裁')) continue;
+      try { hits.push({ ...JSON.parse(line), archive: f }); } catch { /* 坏行跳过 */ }
+    }
+  }
+  if (!hits.length) { console.log('没有标着「可裁」的。'); process.exit(0); }
+  console.log(`${hits.length} 张整图里标了能裁的格子：`);
+  for (const it of hits) {
+    const p = path.join(dir, 'reject', path.basename(it.file || ''));
+    const alive = fs.existsSync(p) ? p : `${p}（不在了）`;
+    console.log(`  ${it.id}  ${it.reason}  ${it.tags?.join('/') || ''}\n    ${alive}  ·${it.archive}`);
+  }
+  process.exit(0);
+}
+
+// screen 那条路要先有能跑的眼睛（headless brain 得在 config.local.json 里配 CLI），
+// 没配就整批跳过、连拼好的联络表也一起删掉——2026-10-29 撞上的就是这个：
+// pending 里三张图永远看不成。这条只出图、不判，路径打印出来我自己 read_image 看，
+// 看完用 approve / reject 落笔，眼睛就不必依赖那个 CLI。
+if (cmd === 'sheet') {
+  const { makeSheet } = await import('../src/stickers/screen.mjs');
+  const s = await snapshot();
+  const list = s.items.filter((i) => i.pending === true).slice(0, Number(arg('max', 16)));
+  if (!list.length) { console.log('没有等着看的'); process.exit(0); }
+  fs.mkdirSync(path.join(ROOT, 'tmp'), { recursive: true });
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
+  const out = path.join(ROOT, 'tmp', `sticker-pending-${stamp}.png`);
+  const sheet = makeSheet(list, out);
+  if (!sheet) {
+    console.error(`拼不成（python/PIL 不在？）——${list.length} 张得逐张看：`);
+    for (const it of list) console.error(`  ${it.id}  ${it.abs}`);
+    process.exit(1);
+  }
+  console.log(`${list.length} 张拼成一张：${sheet.path}`);
+  for (const t of sheet.thin) console.log(`  ⚠ ${t.id} 缩了 ${t.ratio} 倍，格子里的小字糊了，判它要单看原图`);
+  for (const it of list) {
+    console.log(`  ${it.id}  ${it.ctx || '(没留语境)'}  ${it.bytes ? Math.round(it.bytes / 1024) + 'KB' : ''}  ${it.abs}`);
+  }
+  process.exit(0);
+}
+
+// 待审的条目只会被 screen 的模型自动过眼，或者面板里点。
+// 我自己看过图之后要能落笔，否则「pending」就只能靠自动判断——2026-10-27 补的。
+if (cmd === 'approve') {
+  if (!pos[0]) { console.error('要给个 id：approve k1023 --tags=困,睡着 --when=…'); process.exit(2); }
+  const r = await write('approve', {
+    id: pos[0],
+    ...(args.tags !== undefined ? { tags: tags(args.tags) } : {}),
+    ...(args.when !== undefined ? { when: args.when === true ? '' : args.when } : {}),
+  });
+  console.log(r.item ? `收下了：${r.item.id} [${(r.item.tags || []).join('/')}] ${r.item.when || ''}` : '没有这个 id');
+  process.exit(0);
+}
+
+if (cmd === 'reject') {
+  if (!pos[0]) { console.error('要给个 id：reject k1020 --reason=screenshot'); process.exit(2); }
+  const reason = String(arg('reason', 'not-a-sticker'));
+  const r = await write('reject', { id: pos[0], reason });
+  console.log(r.ok ? `退掉了：${pos[0]}（${reason}，图挪到 reject/ 留档）` : `没有这个 id：${pos[0]}`);
   process.exit(0);
 }
 
@@ -276,6 +350,7 @@ switch (cmd) {
   default:
     console.log(
       '用法：list | pickup <路径> [--tags=] [--when=] [--from=] | tag <id> [--tags=] [--when=] | ' +
+      'approve <id> [--tags=] [--when=] | reject <id> [--reason=] | ' +
       'find [--tags=] [--text=] [--todo] | use <id> | drop <id> | ' +
       'pending | screen [--max=4] | dedupe [--dry] | stats | prune [--count=300] [--mb=200] [--dry] | where',
     );

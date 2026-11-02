@@ -1,6 +1,6 @@
 {
   "name": "afullife",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "把 QQ 接进 DeepSeek Harness：一个身份、一份记忆，横跨 QQ 和 DSH。",
@@ -18,9 +18,10 @@
     "install:panel": "node scripts/install-panel.mjs",
     "update": "node scripts/update.mjs",
     "update:check": "node scripts/update.mjs --check",
-    "probe:rules": "node scripts/probe-rules.mjs",
     "lint": "eslint .",
-    "probe:conflict": "node scripts/probe-conflict.mjs"
+    "probe:conflict": "node scripts/probe-conflict.mjs",
+    "probe:panel": "node scripts/probe-panel-note.mjs",
+    "probe:stale": "node scripts/probe-stale.mjs"
   },
   "license": "MIT",
   "keywords": [

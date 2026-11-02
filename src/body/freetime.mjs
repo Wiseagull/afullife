@@ -5,6 +5,7 @@
 // 这样她才是真的在这段时间里活着。
 
 import { ROOT } from '../config.mjs';
+import { agoLabel } from '../memory/context.mjs';
 
 const PERM = {
   look: '这一段你只能看，不能动：可以截图看屏幕、读文件、看进程、上网翻东西；不要点鼠标键盘，不要改任何文件，不要装东西。',
@@ -25,6 +26,21 @@ const PROTOCOL = [
 // 她把给程序看的标记单独写一行夹在话里时（「……先站起来走两步。\n<pass/>」），
 // 发之前得剥掉。整段只有标记的情形由调用处那几个分支先处理，这里只管「话 + 标记」。
 // 2026-10-25 13:38 那次就把 <pass/> 原样发进了群里。
+/**
+ * 自由活动这一拍读得太多，下一拍就该换一条新会话。
+ *
+ * 阈值跟聊天那条链共用一个数（brain.headless.rotateAtTokens）：2026-10-28 量到
+ * 自由活动原来是「一整段共用一条会话」，越跑越长，单轮读到过 334 万 token——
+ * 一轮 9~10 步，每步都重读一遍全量上下文。那天 26 拍花了 1542 万，和 90 轮聊天
+ * 一样贵，而聊天那条有阈值管着，一直稳在 15~20 万。
+ *
+ * 换会话不影响她是谁：记忆在 events / notes / 交接纸条里，不在会话历史里。
+ */
+export function shouldRotateFree(readTokens, rotateAtTokens) {
+  const limit = Number(rotateAtTokens) || 60000;
+  return (Number(readTokens) || 0) >= limit;
+}
+
 export function stripMarks(text) {
   return String(text ?? '')
     .replace(/^[ \t]*<(?:pass|done|wait:\s*\d+|busy:[^<>]*)\s*\/?>[ \t]*$/gim, '')
@@ -44,12 +60,38 @@ function fmtMs(ms) {
   return `${m} 分钟`;
 }
 
-/** 事件离现在多久，说人话。 */
-function ago(ms) {
-  const d = Math.max(0, Number(ms) || 0);
-  if (d < 90_000) return '刚刚';
-  if (d < 3600_000) return `${Math.max(1, Math.round(d / 60_000))} 分钟前`;
-  return `${Math.round(d / 3600_000)} 小时前`;
+/**
+ * 事件离现在多久，说人话。
+ *
+ * 只做薄包装——判据和文案都在 memory/context.mjs 的 agoLabel 上。
+ * 2026-11-02 审计发现这里和 agoLabel 各写了一份一模一样的阈值和措辞，
+ * 改一处漏一处就会让两处提示词对同一段时间说两种话。
+ */
+export function ago(ms) {
+  return agoLabel(Date.now() - Math.max(0, Number(ms) || 0));
+}
+
+/** 这个房间最近说过的话，每句都带"多久之前"。 */
+//
+// 不带时间的后果（2026-10-30 23:52、23:54 那两拍）：两小时前的话和刚刚的话并排摆着，
+// 读起来全是"刚才"，她就顺着早已聊完的那件事又讲了整整两拍。
+// 只取最近半小时：更早的不该被当成"现场"。
+export function recentTalk(list, { windowMs = 30 * 60 * 1000, limit = 12, now = Date.now() } = {}) {
+  const arr = Array.isArray(list) ? list : [];
+  const win = Math.max(60_000, Number(windowMs) || 0);
+  const cap = Math.max(1, Number(limit) || 12);
+  return arr
+    .filter((e) => e && Number(e.ts) > 0 && now - Number(e.ts) < win)
+    .slice(-cap)
+    .map((e) => {
+      const who = e.dir === 'in' ? '他' : '你';
+      const flat = String(e.text || '').replace(/\s+/g, ' ');
+      // 削过就得写出「…」。2026-11-02 11:19 那回，这一行把 171 字的一句削在 120 字上、
+      // 正好停在「19，我在下一拍看见的是一句没说完的话，差点去修一个不存在的洞。
+      // 不标出来的截断，跟"话说了一半就断了"长得一模一样——它俩不该长得一样。
+      const body = flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+      return `${ago(now - Number(e.ts))}，${who}：${body}`;
+    });
 }
 
 // 他这一句，到底算不算"打断"。
@@ -164,6 +206,10 @@ export class FreeTime {
   #paused = false;       // 他在跟她说话，这一段的表先停住
   #pausedAt = 0;         // 从什么时候起停的
   #pausedTotal = 0;      // 这一段一共停了多久（给 status 看）
+  #beating = false;      // 一拍还没回来：同一段里不叠第二拍
+  #beatSeq = 0;          // 拍号（只增）：#beating 由最新的那一拍才放得开
+  #epoch = 0;            // 每开一段/收一段 +1；拍子用它认自己是不是上一段的遗孤
+  #beatAbort = null;     // 这一拍底下那轮 headless 的叫停开关（段收了就掐）
 
   constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts, onUsage, onBusy }) {
     this.#cfg = cfg;
@@ -217,6 +263,8 @@ export class FreeTime {
     if (this.#running) return { ok: false, error: '已经在自由活动了', status: this.status() };
     const dur = Number(minutes) > 0 ? Number(minutes) * 60000 : Number(f.durationMs ?? 1800000);
     this.#running = true;
+    this.#epoch += 1;
+    this.#beating = false;
     this.#startedAt = Date.now();
     this.#endsAt = this.#startedAt + dur;
     this.#beats = 0;
@@ -248,6 +296,12 @@ export class FreeTime {
 
   #finish(reason) {
     this.#running = false;
+    this.#epoch += 1;      // 这一段到此为止：还挂在外面的那一拍回来时认得出自己是遗孤
+    this.#beating = false;
+    // 只挡住它说话还不够：底下那一轮还在跑，会一直跑到 300 秒上限，
+    // 烧掉的 token 是真的，还和下一段抢同一张图（22:24 那次跑了六分钟）。
+    this.#beatAbort?.abort();
+    this.#beatAbort = null;
     this.#reason = reason;
     this.#paused = false;
     this.#pausedAt = 0;
@@ -280,12 +334,36 @@ export class FreeTime {
     if (this.#ownerTalking()) return this.#pause();
 
     if (Date.now() >= this.#endsAt) return this.#finish('时间到');
+    // 一拍还没回来，这次就不叠。
+    //
+    // 2026-10-26 22:33 那次：同一个房间里两拍一起回来了，6 秒里两条开场白都发出去
+    // （日志里两条「开场那句发出去了（不占额度）」，两个不同的 session）。
+    // 原来的写法只靠 #schedule 一个定时器兜着，可只要有一拍是"超时被放弃、
+    // 底下的 run 还活着"，下一个定时器就能和它在同一段时间里并行跑。
+    // 它自己回来时会接着排下一拍，所以这里直接让开，不补也不催。
+    if (this.#beating) {
+      this.#log('free', '上一拍还没回来，这一拍不叠（免得两个我在同一间屋里同时说话）');
+      return;
+    }
+    // 2026-10-27 21:0x 查了一遍：这道闸从上线起一次都没响过（全量日志 0 条），
+    // 而且按现在的写法响不了——#schedule 只在 tick 里排、tick 一拍只跑一次，
+    // 一拍在飞的时候根本没有表在走，#beating 就一直是 false。
+    // 真挡住 22:33 那次并行的是 epoch 判遗孤 + #finish 里的 abort + headless 的 killTree，
+    // 不是这三行。别把它当"并行已经防住了"的证据。
+    // 剩下的缝在别处：taskkill 要是没掐死，3 秒后下一拍照样起得来，而这里只看得见表、看不见进程。
+    // 那一层现在由 headless 自己回报（掐不动就记一行「掐进程没确认成功」），别再靠猜。
     // 这一拍不占"说话锁"——锁只管真要发出去那一下（见 #say）。
     //
     // 以前整拍都排在锁里：这一拍想 90-150 秒，他那句话就在后面等 90-150 秒，
     // 连"在呢"都垫不出来。想事情不打扰任何人，不该让人等。
     // 会不会撞车？这一拍回来要发之前会再看一眼房间（#yieldBecause），
     // 他在这拍里说过话就咽回去，所以并发想、串行说，不会两个声音。
+    const epoch = this.#epoch;
+    // 每一拍一个号：#beating 只能由"当前这一拍"清掉。
+    // 不然上一段的遗孤回来时会把新一段那拍的锁一起放开，两条链又并行了——
+    // 那就把刚补的洞重新打开一次。
+    const beatId = (this.#beatSeq += 1);
+    this.#beating = true;
     this.#beat().then(() => { this.#errors = 0; this.#longBeats = 0; }).catch((e) => {
       const msg = String(e?.message ?? e);
       // 撞到一拍的上限，但事件几十秒内还在流：她是在干活，不是卡死。
@@ -296,6 +374,8 @@ export class FreeTime {
       // 其实什么都没坏。长拍不算故障，只算这一拍太长：接着做，但要她收尾。
       const longBeat = e?.code === 'HEADLESS_TIMEOUT'
         && Number.isFinite(e?.stallMs) && e.stallMs <= LONG_BEAT_FRESH_MS;
+      // 这一段已经收了、或者已经换了新的一段：这一拍的回声不该再往后排。
+      if (epoch !== this.#epoch) return;
       if (longBeat) {
         this.#longBeats += 1;
         this.#log('free', `这一拍撞到时间上限，还在干活（${msg}）第 ${this.#longBeats} 次`);
@@ -315,6 +395,9 @@ export class FreeTime {
         return this.#finish('连续出错');
       }
       this.#schedule(15000);
+    }).finally(() => {
+      // 只有"最新那一拍"有资格放开锁：遗孤收尾时不许动别人的拍。
+      if (this.#beatSeq === beatId) { this.#beating = false; this.#beatAbort = null; }
     });
   }
 
@@ -333,8 +416,23 @@ export class FreeTime {
     if (!(activeMs > 0) || !this.#roomState) return false;
     let st = {};
     try { st = this.#roomState() || {}; } catch { return false; }
-    const lastTs = Number(st.lastTs) || 0;
-    return st.lastDir === 'in' && lastTs > 0 && Date.now() - lastTs < activeMs;
+    // 判据用「两个人最后一次真的在对话的时刻」，不是「他最后一次开口的时刻」。
+    //
+    // 差的这一步要命：她一回话，lastTs 就成了她的、lastDir 也变成 'out'，
+    // 按旧判据这一停当场结束，自由活动立刻接着排下一拍，把他刚问过的事再答一遍。
+    // 2026-10-27 11:52 他问按不按条数挂表情，回话里已经答了（「那本鲸就不硬凑了」）；
+    // 11:56 自由活动第 4 拍又答了一遍（另一条 session，看不见她刚才说过话）。
+    //
+    // 2026-10-27 又差半步：只看他的时刻，等于她刚答完就不算对话了。
+    // 他 16:14 说完、她 16:16 答完（那条答得久），16:20 那一拍就按"他安静满 5 分钟"醒了，
+    // 插进来说了句和她刚说过的正相反的话。所以两头取晚的那个：
+    // 他在说、或者她刚在回话里应过他，都算这段对话还没散。
+    // 只认回话里的 out，不认自由活动自己发的（roomState 里已经滤掉 e.free），
+    // 否则她每一拍都在刷新时钟，自由时间永远开不起来。
+    const lastInTs = Number(st.lastInTs) || 0;
+    const lastOutTs = Number(st.lastOutTs) || 0;
+    const clock = Math.max(lastInTs, lastOutTs);
+    return clock > 0 && Date.now() - clock < activeMs;
   }
 
   #pause() {
@@ -363,6 +461,9 @@ export class FreeTime {
 
   async #beat() {
     if (!this.#running) return;
+    // 这一拍开头属于哪一段。想事情要一分多钟，回来时这一段可能已经收了、或者已经换了
+    // 新的一段——那样它说的话就是上一段的回声（2026-10-26 22:33 撞过一次）。
+    const epoch = this.#epoch;
 
     // 他正在说话：这一拍让路。
     //
@@ -374,10 +475,12 @@ export class FreeTime {
     if (activeMs > 0 && this.#roomState) {
       let st = {};
       try { st = this.#roomState() || {}; } catch { st = {}; }
-      const lastTs = Number(st.lastTs) || 0;
-      if (st.lastDir === 'in' && lastTs && Date.now() - lastTs < activeMs) {
+      const lastInTs = Number(st.lastInTs) || 0;
+      const lastOutTs = Number(st.lastOutTs) || 0;
+      const clock = Math.max(lastInTs, lastOutTs);
+      if (clock && Date.now() - clock < activeMs) {
         this.#last = '他还在说话，这一拍她让开了。';
-        this.#log('free', `他 ${Math.round((Date.now() - lastTs) / 1000)} 秒前还在说话，这一拍让路`);
+        this.#log('free', `${Math.round((Date.now() - clock) / 1000)} 秒前两个人还在对话，这一拍让路`);
         this.#schedule(this.#beatMs());
         return;
       }
@@ -395,6 +498,20 @@ export class FreeTime {
 
     const said = (() => {
       try { return String(this.#recent?.() || '').trim(); } catch { return ''; }
+    })();
+
+    // 这个房间刚才说过的话——他说的、她说的都算，包括她自己刚在正常回话里答过的那几句。
+    //
+    // 起因 2026-10-27 11:52：他在回话里问「按不按条数挂」，回话那条链上她已经答过了
+    // （「那本鲸就不硬凑了」），可 11:56 这一拍又答了一遍（「行。那就不按条数挂」）。
+    // 两条链各挂一条 DSH 会话，看不见对方的"刚刚"。停表只管别在他刚说完时就拍，
+    // 这一条管拍了之后眼睛是睁着的。
+    const talk = (() => {
+      try {
+        const st = this.#roomState ? (this.#roomState() || {}) : {};
+        const list = Array.isArray(st.talk) ? st.talk : [];
+        return list.length ? list.join('\n') : '';
+      } catch { return ''; }
     })();
 
     // 房间里有没有人应：没人就不硬开这个口
@@ -452,6 +569,9 @@ export class FreeTime {
         : null,
       quota > 0 ? `这段时间你还能主动说 ${quota} 句话。` : '这一段时间的话已经说完了，剩下的时间只能自己待着，不能再发消息。',
       this.#last ? `你上一拍：${this.#last}` : null,
+      talk
+        ? `【这个房间刚才的对话】\n${talk}\n（每句前面是多久之前——老的那些别当成刚发生的。这些都已经说过一遍了：他问的事你要是已经答过，就别再答一遍，接着往下说，或者干脆安静待着。）`
+        : null,
       draftBlock,
       '',
       opening
@@ -470,11 +590,35 @@ export class FreeTime {
 
     const t0 = Date.now();
     const beatStart = t0;
-    const r = await this.#brain.run({ prompt, sessionId: this.#sid });
+    // 这一轮可以被外面叫停：这一段收了（手动结束/时间到/她说完了）就不再让它跑下去。
+    const ctl = new AbortController();
+    this.#beatAbort = ctl;
+    const r = await this.#brain.run({ prompt, sessionId: this.#sid, signal: ctl.signal, kind: 'free' });
     try { this.#onUsage?.(this.#room, r, 'free'); } catch { /* 记账失败不影响她说话 */ }
-    if (!this.#running) return;
-    if (r?.sessionId) this.#sid = r.sessionId;
+    // 回来晚了一步：这一段已经收了，或者已经是新的一段。这句不发了，也不往新段里排——
+    // 拍子计数、开场标记都属于旧段，硬塞进去就是两个我同时说话。
+    if (!this.#running || epoch !== this.#epoch) {
+      if (epoch !== this.#epoch) this.#log('free', '上一段的那一拍回来晚了，这句不发（它属于已经收掉的那一段）');
+      return;
+    }
     let text = String(r?.text ?? '').trim();
+    // 这一拍读了多少，涨到阈值就换一条新会话——跟正常回话那条链用同一个尺子。
+    //
+    // 2026-10-28 量到的：自由活动原来是「一整段共用一条会话」，start() 时置空、
+    // 之后每拍沿用，越跑越长。单轮读到过 334 万 token——因为一轮跑 9~10 步，
+    // 每一步都要重读一遍全量上下文。那天 26 拍花了 1542 万，和 90 轮聊天一样贵。
+    // 聊天那条链有 rotateAtTokens 管着，一直稳在 15~20 万；这条路以前根本没有这个机制。
+    //
+    // 换会话不影响她是谁：记忆在 events / notes / 交接纸条里，不在会话历史里。
+    // 这一段自由活动断掉前几拍的上下文，本来也不是必须的——她在里面是「自己过日子」。
+    const readTokens = Number(r?.usage?.totalTokens) || 0;
+    const rotateAt = Number(this.#cfg?.brain?.headless?.rotateAtTokens ?? 60000) || 60000;
+    if (shouldRotateFree(readTokens, rotateAt)) {
+      this.#log('free', `这一拍读了 ${readTokens} token（超过 ${rotateAt}），下一拍换条新会话`);
+      this.#sid = null;
+    } else if (r?.sessionId) {
+      this.#sid = r.sessionId;
+    }
     this.#beats += 1;
     this.#thinkMs += Date.now() - t0;
 
@@ -550,8 +694,13 @@ export class FreeTime {
       return this.#finish('她说完了');
     }
 
-    // 等待
-    const wait = text.match(/<wait:\s*(\d+)\s*\/?>/i);
+    // 等待（只有整句就是这个标记时才算命令）
+    //
+    // 2026-10-27 21:16 那次：我想跟他解释「我写 <wait:600/> 会被压成六百秒」，
+    // 话里带着那个标记，于是整句话被当成指令——消息没发出去，人还停了十分钟，
+    // 他那边什么都没收到。讲标记的时候标记会被执行，所以这里改成整句匹配；
+    // 没匹配上的标记后面会被 stripMarks 剥掉，不会跟着话发出去。
+    const wait = /^\s*<wait:\s*(\d+)\s*\/?>\s*$/i.exec(text);
     if (wait) {
       const secs = Math.min(600, Math.max(10, Number(wait[1])));
       this.#last = `她想再等 ${secs} 秒（${text.replace(wait[0], '').trim().slice(0, 40) || '没多说'}）。`;

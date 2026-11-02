@@ -1,7 +1,7 @@
 # 命令行小工具
 
 `scripts/` 里全是 `node scripts/xxx.mjs` 直接跑的小工具，没有安装步骤，也没有第三方依赖。
-共 23 个，按"什么时候会用到"分三类。要看某一个的具体参数，就跑 `node scripts/xxx.mjs --help`
+共 31 个，按"什么时候会用到"分三类。要看某一个的具体参数，就跑 `node scripts/xxx.mjs --help`
 或者不带参数跑一次——它们都会先印用法。
 
 ---
@@ -40,6 +40,12 @@
 | `node scripts/usage.mjs` | 今天花了多少 token、按房间分开 |
 | `node scripts/whats-new.mjs` | 在 DSH 那边看 QQ 侧最近发生了什么 |
 | `node scripts/new-session.mjs [房间]` | 换掉某个房间的会话（不给房间就全换）。换之前会自动写一张交接纸条 |
+| `node scripts/voice.mjs pick [--scope=private]` / `show` | 挑几句"她平时怎么说话"当样例，写进 `data/voice-samples.json`。挑的是短、像人话、没工具痕迹的旧句——摆回她眼前，就是把腔调钉住 |
+| `node scripts/persona-check.mjs [--days=3]` | 人设漂没漂，拿数说话：平均长度、结构化程度、自称率，三个数都从她自己说过的话里算。越线退出码 1 |
+| `node scripts/qzone.mjs list` / `post "一句话"` | 看她自己空间最近说了什么、发一条纯文字说说。默认关着，`config.local.json` 里 `qzone.enabled` 改成 true 才能发 |
+| `node scripts/web.mjs <url> [--max=20000] [--from=词] [--grep=词]` | 抓网页/接口，吐成能读的文字。`web_fetch` 在本机一律报"非公网 IP"（Clash 的 fake-ip 落在保留段），这条走 Node 的 fetch，不受影响 |
+| `node scripts/send-image.mjs <图片路径> [--to=号] [--group=群号]` | 绕过桥直连 OneBot 发一张图，救急用（桥还是旧进程、自由活动那条路发不出图时就靠它）。不过审计、不记表情库 |
+| `node scripts/art-index.mjs [输出路径]` | 给 `data/art` 里那些图生成一份 `索引.md`（按目录列文件名、尺寸、大小）。只读文件，不改图 |
 
 ## 三、自检与开发（改代码之后跑）
 
@@ -48,14 +54,16 @@
 | 命令 | 检查什么 |
 | --- | --- |
 | `node scripts/doctor.mjs` | 一次看完"装好了没、还活着没、数据有没有坏"：Node 版本、人格三份、桥与 SnowLuma 在不在、表情库账实、事件流大小、小本本用量，分正常/提示/警告/错误四档，有错误时退出码 1。`--json` 给机器读，`--no-net` 不连本机端口 |
-| `node scripts/selftest.mjs` | 129 项：房间与路由、分条、记忆装配、看图白名单、交接纸条 |
+| `node scripts/selftest.mjs` | 460 项：房间与路由、分条、记忆装配、看图白名单、发图标记、自由活动抠图、交接纸条、兴趣账本、探针与看门人、门牌、切格切不开时报的数、历史段的 token 保险丝。全绿之后会自己再问一句"这份生效了没"——桥比 `src/` 旧就就地印一行「这份还没生效」，不算失败项、不改退出码 |
 | `node scripts/probe-gate.mjs` | 闸的用例表（什么放行、什么要先问） |
 | `node scripts/probe-social.mjs` | 群聊社交状态机与"听着/开口"的判定 |
 | `node scripts/probe-conflict.mjs` | "先问后改"：新说法和旧记忆打架时她会不会来问你 |
-| `node scripts/probe-rules.mjs` | 规程按需挂：闲聊时精简、派活时全套 |
+| `node scripts/probe-panel-note.mjs [--limit=N]` | 切格工具的退回说明有**两份渲染**（`tools/panel-split.py` 的 `reason_note` 给她看、`src/stickers/screen.mjs` 的 `uncutNote` 给模型看）。同一句话今天假过两次，两次都是只改了一边。这条拿 reject 里的图，把两份输出逐数对账（段数=缝数+1、倍数/占比容精度差），谁改单边谁红。改动文案后跑它，跑不了 python 会明说"没验"，不算过 |
+| `node scripts/probe-stale.mjs [--json] [--since="2026-11-01 20:14:50"] [--log=<路径>]` | 现在跑着的桥，是不是盘上最新那份代码：拿日志里最后一次"桥已启动"的时间，去比 `src/` 下每个 `.mjs/.js` 的修改时间，比它新的就是**改完还没生效**的，退出码 1。改完代码、桥还没重启的时候跑它——别拿"自检全绿"当"已经生效"。看的是修改时间不是内容（`touch` 过的也会算进去）；判不了时（日志里没启动记录、或那条 pid 已经不在）退出码 2，不返回 0。桥自己那头是另一半：`src/util/stale-watch.mjs` 每 5 分钟扫一次「启动之后改过谁」，改过就在日志里记一行「这份还没生效」（`QAD_STALE_WATCH_MS` 改间隔，0 关掉）——不用谁记得问 |
 | `node scripts/check-secrets.mjs` | 发布前扫密钥、本机路径、个人标识。**推送前跑一下** |
 | `node scripts/probe-gate-live.mjs` | 真机联调闸（要 `config.local.json` 里填好 `brain.headless.cli`） |
 | `node scripts/probe-approve-live.mjs` | 真机联调"拦下来→问你→放行"这一圈 |
+| `node scripts/prompt-ab.mjs` | 承重词实验：同一张工作流、同一个种子，只改正向提示词里的某几个词，看耳朵长成什么样。要本机 ComfyUI 和 dsh-qwen-paint，不是日常工具 |
 
-CI 里跑的是 `selftest`、`probe-gate`、`probe-social`、`probe-conflict`、`probe-rules`、`check-secrets`
-这六个（`doctor` 要连本机端口，用 `--no-net` 也能跑，但更适合装完/出事时手动敲），在 Windows 与 Linux 上各一遍。
+CI 里跑的是 `selftest`、`probe-gate`、`probe-social`、`probe-conflict`、`check-secrets`
+这五个（`doctor` 要连本机端口，用 `--no-net` 也能跑，但更适合装完/出事时手动敲），在 Windows 与 Linux 上各一遍。

@@ -118,6 +118,16 @@ export async function upkeep({ brain, notes, pending = null, logger = null, maxO
     return null;
   }
 
+  // 2026-10-28 查出来的坑：清单长到 360 多条之后，模型会把输出上限全花在思考上
+  // （实测一次 76536 字的 reasoning，一个 JSON 都没吐），harness 按 max-tokens 收场、
+  // final 为空。原来这里不判空，直接把空串解析成 []，日志写出一行漂亮的
+  // 「体检 364 条 → 压过时 0 / 改准 0 / 合并 0」——看着像这儿没毛病，其实是整轮白跑。
+  // 今天这一种就发生了 4 次，每次 9 万 token、四分钟，日志里一点异常都看不出来。
+  if (!raw.trim()) {
+    logger?.('upkeep', `体检没跑成：${items.length} 条这一轮脑子交了白卷（多半撞满输出上限），跳过`);
+    return null;
+  }
+
   const PROTECTED = new Set(['约定', '偏好']);
   let staled = 0;
   let updated = 0;

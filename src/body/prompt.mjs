@@ -207,6 +207,48 @@ export function videoHint() {
   ].join('');
 }
 
+/** 历史段的 token 保险丝。超过它就裁，没超过原样放。 */
+export const HISTORY_MAX_TOKENS = 300000;
+
+/**
+ * 粗估一条消息值多少 token。
+ *
+ * 中文约 1.5 字一个 token，英文约 4 字一个。统一按 1.6 字符/token 算，
+ * 宁可高估——它是保险丝，不是账本，估高了只会早一点裁，不会把 prompt 撑爆。
+ */
+export function roughTokens(value) {
+  if (typeof value === 'string') return Math.ceil(value.length / 1.6);
+  if (value && typeof value === 'object' && 'text' in value) {
+    return Math.ceil(String(value.text ?? '').length / 1.6) + 8;
+  }
+  return Math.ceil(String(value ?? '').length / 1.6);
+}
+
+/**
+ * 历史段要不要裁。
+ *
+ * 正常情况下原样返回——**不裁，前缀才稳定，缓存才接得上**。
+ * 只有估算超过 maxTokens 时，才从最旧那头一次丢到约三分之二。要丢就丢够，
+ * 别每轮丢一点：每轮丢一点等于每轮整段重付，那正是 2026-11-01 那 87 轮在花钱的方式。
+ */
+export function fitHistory(items, { maxTokens = HISTORY_MAX_TOKENS, estimator = roughTokens } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const n = list.length;
+  if (!n) return [];
+  const sizes = list.map((it) => Number(estimator(it)) || 0);
+  const total = sizes.reduce((a, b) => a + b, 0);
+  if (total <= maxTokens) return list;
+  const target = Math.floor(maxTokens * (2 / 3));
+  let acc = 0;
+  let cut = 0;
+  for (let i = n - 1; i >= 0; i--) {
+    acc += sizes[i];
+    cut = i;
+    if (acc >= target) break;
+  }
+  return list.slice(cut);
+}
+
 export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null, usageLine = '', voice = '', state = '' }) {
   const lines = [];
 
@@ -231,10 +273,19 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
   }
 
   // 这个房间刚才聊了什么，永远摆出来——背景里的“记忆”不代替现场。
+  //
+  // 这里刻意不按条数滑窗。以前是 slice(-14)，每来一条新消息整段就往前挪一格，
+  // 而缓存按前缀匹配，一挪整段就重付：2026-11-01 群聊 433 轮里有 87 轮每轮新输入
+  // 12–18 万，47% 的钱花在这上面。现在让它自然涨，涨到 rotateAtTokens 换会话归零——
+  // 换一次付一次整段，摊到每轮只剩新增。fitHistory 只是保险丝，不参与日常裁剪。
   const older = recent.slice(0, Math.max(0, recent.length - messages.length));
   if (older.length) {
     lines.push('【刚才在这儿的对话】');
-    lines.push(renderTranscript(older.slice(-14)));
+    lines.push(renderTranscript(fitHistory(older)));
+    // 上面这些是已经回过话的。不写这一句，新一轮会把里面那句再答一遍：
+    // 2026-10-28 01:03 他说「想和你一起睡」，01:03:47 答过一次；01:03:35 那张图另起
+    // 一轮时，prompt 里还带着那句话，于是 01:04:26 又答了一遍同一个点。
+    lines.push('（这些你已经回过了。别再答第二遍——只说你现在要说的那件事。）');
     lines.push('');
   }
 

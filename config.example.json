@@ -11,5 +11,5 @@
       "workspace": "这里填这个项目的目录"
     }
   },
-  "_comment": "必填只有两项：owner.userIds（你自己的 QQ 号）与 brain.headless.workspace（这个项目所在的目录）。rootIds 是「特权号」——填了之后只有这几个号能让她动手干活，别人的请求一律拒绝；不填就跟 userIds 一样。SnowLuma 的目录与令牌会自己找、自己读。其余所有可调项（群聊接话频率、自由活动、垫话、表情、记忆体检间隔、会话几轮就换、闸的白名单……）都不用写在这里：首次启动会连默认值一起落到 config.local.json，之后在面板「AFL 通道」里改。"
+  "_comment": "必填只有两项：owner.userIds（你自己的 QQ 号）与 brain.headless.workspace（这个项目所在的目录）。rootIds 是老写法，代码里会把它并进 userIds（config.mjs 的 loadConfig 末尾），新配置不用写；能否让她动手只取决于「这条消息的全部发送者都在 owner.userIds 里」。SnowLuma 的目录与令牌会自己找、自己读。其余所有可调项（群聊接话频率、自由活动、垫话、表情、记忆体检间隔、会话几轮就换、闸的白名单……）都不用写在这里：首次启动会连默认值一起落到 config.local.json，之后在面板「AFL 通道」里改。"
 }

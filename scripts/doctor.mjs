@@ -236,13 +236,23 @@ function checkStickers() {
     const tagged = g.filter((id) => (byId.get(id)?.tags || []).includes('重复')).length;
     return tagged < g.length - 1;
   });
+  // 反过来也得看：盘上有、账里没有的文件谁也发不出去，清库也清不掉。
+  // 以前这里只从条目走向文件，所以 k0263.gif 在库里挂了十二天、这里照样报「账实相符」。
+  const known = new Set(items.map((it) => path.basename(it.file)));
+  const stray = [];
+  try {
+    for (const ent of fs.readdirSync(path.join(dir, 'library'), { withFileTypes: true })) {
+      if (ent.isFile() && !known.has(ent.name)) stray.push(ent.name);
+    }
+  } catch { /* 目录还没建 */ }
   if (missing.length) add('warn', '表情库·缺文件', `${missing.length} 条指向的图不在了：${missing.slice(0, 6).join(', ')}${missing.length > 6 ? ' …' : ''}（确认不要了：node scripts/sticker-lib.mjs drop <id>）`);
+  if (stray.length) add('warn', '表情库·多出文件', `${stray.length} 个文件在盘上但账里没有（发不出去、也不会被清）：${stray.slice(0, 6).join(', ')}${stray.length > 6 ? ' …' : ''}（还想要：node scripts/sticker-lib.mjs pickup <路径>；不要了就挪出 library/）`);
   if (badExt.length) add('warn', '表情库·扩展名', `${badExt.length} 条名字和真身对不上（read_image 会拒读）：${badExt.slice(0, 6).join(', ')}${badExt.length > 6 ? ' …' : ''}`);
   if (badText.length) add('warn', '表情库·乱码', `${badText.length} 条标签/语境里带问号或替换符：${badText.slice(0, 6).join(', ')}${badText.length > 6 ? ' …' : ''}`);
   if (untaggedDup.length) add('warn', '表情库·重复', `${untaggedDup.length} 组内容一样但没标「重复」（node scripts/sticker-lib.mjs dedupe 可以标掉）`);
   else if (dupGroups.length) add('info', '表情库·重复', `${dupGroups.length} 组内容一样，都标好了，等清库时先走`);
-  if (!missing.length && !badExt.length && !badText.length && !dupGroups.length) {
-    add('ok', '表情库·账实相符', '文件都在、名字都对、没有重复组');
+  if (!missing.length && !badExt.length && !badText.length && !dupGroups.length && !stray.length) {
+    add('ok', '表情库·账实相符', '文件都在、名字都对、没有重复组、没有多出来的文件');
   }
 }
 

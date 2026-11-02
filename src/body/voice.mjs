@@ -161,18 +161,6 @@ export function samplesFor(store, roomKey = '') {
   return { samples: [], from: '', scope: '' };
 }
 
-/** 老接口：整份当 global 读写 */
-export function loadSamples(file) {
-  return loadStore(file).global;
-}
-
-export function saveSamples(file, samples = []) {
-  const store = loadStore(file);
-  setScope(store, 'global', samples);
-  saveStore(file, store);
-  return samples.length;
-}
-
 /** 拼成提示词里那一段 */
 export function voiceBlock(samples = []) {
   const list = (samples || []).filter((x) => typeof x === 'string' && x.trim()).slice(0, 8);
