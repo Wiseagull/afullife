@@ -11,6 +11,7 @@ import { UsageStore, describeUsage } from '../src/usage/store.mjs';
 import { buildPrompt, buildTriggerLines, videoHint, fitHistory, roughTokens, HISTORY_MAX_TOKENS } from '../src/body/prompt.mjs';
 
 import { sniffImage, sniffVideo } from '../src/media/sniff.mjs';
+import { storeImageBuffer } from '../src/media/store.mjs';
 import { gifFrameCount, isAnimatedGif } from '../src/media/gif.mjs';
 import { selfLines, agoLabel, refTag, buildBackground } from '../src/memory/context.mjs';
 import { SerialQueue } from '../src/body/queue.mjs';
@@ -27,7 +28,7 @@ import { Doing } from '../src/body/doing.mjs';
 import { InterestStore } from '../src/interests/store.mjs';
 import { dedupe, upkeep } from '../src/memory/upkeep.mjs';
 import { stallNote, FailBook } from '../src/brain/stall.mjs';
-import { findStart, staleFrom, assess, staleNote } from './probe-stale.mjs';
+import { findStart, staleFrom, assess, staleNote, startFromFiles } from './probe-stale.mjs';
 import { createStaleWatch } from '../src/util/stale-watch.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1521,6 +1522,31 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('记忆：不许再要求第三人称', !dsrc.includes('第三人称'));
 }
 
+// ── 技术记忆不许进群聊 ──────────────────────────────────────
+// 2026-11-06 21:21 那次：群里在聊 MP7，她插一句「记忆里有两处打架 画图到底走不走 LoRA」，
+// 还叫了「先生」。根因是 641 条 room:null 的全局记忆里混着大量技术条目，
+// 按 weight（2~3）排就挤进群聊取的前 12 条。
+{
+  const notes = [
+    { kind: '事实', text: 'SD 的渐变发色 LoRA 是拿彩虹头发训的', room: null, weight: 3 },
+    { kind: '事实', text: '他喜欢被叫先生', room: null, weight: 2 },
+    { kind: '偏好', text: '群里有人爱熬夜', room: 'group:1', weight: 1 },
+  ];
+  const g = buildBackground({ notes, roomKey: 'group:1' });
+  ok('记忆：群聊里不给技术性的（LoRA/工作流/模型）', !g.includes('LoRA'));
+  ok('记忆：群聊里照给生活类的', g.includes('他喜欢被叫先生'));
+  ok('记忆：私聊里技术记忆照给', buildBackground({ notes, roomKey: 'private:2' }).includes('LoRA'));
+
+  const many = Array.from({ length: 20 }, (_, i) => ({ kind: '偏好', text: `第 ${i} 件生活事`, room: null, weight: 1 }));
+  const nOf = (s) => (s.match(/^- /gm) || []).length;
+  ok(
+    '记忆：群聊最多 6 条，私聊 12 条',
+    nOf(buildBackground({ notes: many, roomKey: 'group:1' })) === 6 &&
+      nOf(buildBackground({ notes: many, roomKey: 'private:2' })) === 12,
+  );
+  ok('记忆：这个房间自己的排前面', buildBackground({ notes, roomKey: 'group:1' }).split('\n')[1].includes('群里有人爱熬夜'));
+}
+
 // ── 工具恒定全套 ────────────────────────────────────────────
 // 2026-10-26：这一块原来测的是「她自己说要全套工具 → 换档重跑」。
 // 实测换档洗缓存，一次多烧 137000 token，而全量和轻装每步只差 9548，
@@ -1729,6 +1755,19 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   check('探针：桥没起或者判不了时不说话',
     [staleNote({ ...fakeStale, pidAlive: null }), staleNote({ ...fakeStale, pidAlive: false }), staleNote({ verdict: 'fresh', pid: 1, pidAlive: true, startedAt: start.at, stale: [] }), staleNote({ verdict: 'unknown', reason: 'x' })],
     [null, null, null, null]);
+
+  // 日志丢了时的兜底。2026-11-02 19:51 就撞上了：重启脚本的 stdout 没接上，
+  // 桥活得好好的，日志却停在上一代——探针当时只会说"判不了"。
+  // 这里用本进程的 pid 当"活着的桥"，心跳 mtime 自己钉，不靠写入快慢。
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'stale-pid-'));
+  const pidFile = path.join(dir2, 'bridge.pid');
+  const beatFile = path.join(dir2, 'bridge.heartbeat');
+  fs.writeFileSync(pidFile, String(process.pid), 'utf8');
+  fs.writeFileSync(beatFile, '0', 'utf8');
+  check('探针：日志丢了时，用 bridge.pid + 心跳认出现在这只', startFromFiles(pidFile, beatFile)?.pid, process.pid);
+  fs.utimesSync(beatFile, new Date(Date.now() - 3600000), new Date(Date.now() - 3600000));
+  check('探针：心跳停了一小时，就不肯拿它当"现在这份"', startFromFiles(pidFile, beatFile), null);
+  fs.rmSync(dir2, { recursive: true, force: true });
 }
 
 // ── 看门人：桥自己那一半 ────────────────────────────────
@@ -1800,6 +1839,88 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ── 清理的出口与闸（2026-11-06）───────────────────────────
+// 起因不是假设：我拿 {maxMb: 0} 去试 reject，以为带 dry，结果 464 张当场删了，
+// fs.unlink 不进回收站，找不回来。所以补三样——dry 真的只报数、keep.json 真的挡住、
+// 一次要删掉大半个目录时先停手。
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-keep-'));
+  const write = (name, bytes, ageDays = 0) => {
+    const p = path.join(dir, name);
+    fs.writeFileSync(p, Buffer.alloc(bytes));
+    if (ageDays) {
+      const t = new Date(Date.now() - ageDays * 86400000);
+      fs.utimesSync(p, t, t);
+    }
+    return p;
+  };
+
+  write('old1.png', 100, 90);
+  write('pinned.png', 100, 400);
+  fs.writeFileSync(path.join(dir, 'keep.json'), JSON.stringify({ keep: ['pinned.png'] }), 'utf8');
+
+  const dryRun = cleanupImages(dir, { retainDays: 30, maxMb: 1024, dry: true });
+  ok('清理：dry 报得出要删几个', dryRun.planned >= 1 && dryRun.removed >= 1);
+  ok('清理：dry 一个字节都不动', fs.existsSync(path.join(dir, 'old1.png')));
+  ok('清理：dry 报的「还剩」是删完之后剩的，不是当前大小', dryRun.bytes === 100);
+
+  const run = cleanupImages(dir, { retainDays: 30, maxMb: 1024 });
+  ok('清理：过期的照删', !fs.existsSync(path.join(dir, 'old1.png')) && run.removed === 1);
+  ok('清理：keep.json 登过的，再老也不动', fs.existsSync(path.join(dir, 'pinned.png')));
+  ok('清理：报的「还剩」是盘上真剩下的', run.bytes === fs.statSync(path.join(dir, 'pinned.png')).size);
+  ok('清理：keep.json 只认本目录里的文件名', !run.refused);
+
+  // 闸：maxMb 写成 0 要把整个目录扫光——先停手。
+  const many = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-gate-'));
+  for (let i = 0; i < 50; i += 1) fs.writeFileSync(path.join(many, `f${i}.png`), Buffer.alloc(64));
+  const blocked = cleanupImages(many, { retainDays: 0, maxMb: 0 });
+  ok('清理：一次要删大半个目录时停下', blocked.refused === true && blocked.removed === 0);
+  ok('清理：停下的时候文件都还在', fs.readdirSync(many).filter((n) => n.endsWith('.png')).length === 50);
+  const forced = cleanupImages(many, { retainDays: 0, maxMb: 0, force: true });
+  ok('清理：带 force 才真清', forced.refused !== true && forced.removed === 50);
+
+  // 小目录不设闸：日常清理十几张不该被拦。
+  const few = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-few-'));
+  for (let i = 0; i < 6; i += 1) fs.writeFileSync(path.join(few, `g${i}.png`), Buffer.alloc(64));
+  const small = cleanupImages(few, { retainDays: 0, maxMb: 0 });
+  ok('清理：目录小的时候不拦', small.refused !== true && small.removed === 6);
+
+  for (const d of [dir, many, few]) fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── 收图落盘：同一张只存一份（2026-11-05）────────────────
+// 起因：data/images 1065 个文件里只有 504 张不同的图，一张表情 4 天存了 46 遍。
+// 名字按 msgId 起，同一张图每来一次换个名字，清理按 mtime 删，复读的占满了名额。
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qad-store-'));
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 1)]);
+
+  const a = storeImageBuffer(dir, png, { fallbackExt: 'jpg' });
+  ok('收图：扩展名按文件头认，不信后缀（png 不叫 jpg）', path.extname(a.file) === '.png');
+  ok('收图：第一次要写下去', a.reused === false && fs.existsSync(a.file));
+
+  const past = new Date(Date.now() - 86400000);
+  fs.utimesSync(a.file, past, past);
+  const b = storeImageBuffer(dir, Buffer.from(png), { fallbackExt: 'jpg' });
+  ok('收图：同一张再来一遍不写第二份', b.file === a.file && b.reused === true);
+  ok('收图：目录里还是一个文件', fs.readdirSync(dir).length === 1);
+  ok('收图：复用那份把 mtime 拨新了（清理按 mtime 删，不拨会被当成旧的）',
+    fs.statSync(a.file).mtimeMs > Date.now() - 60000);
+
+  const c = storeImageBuffer(dir, Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(20, 2)]), {});
+  ok('收图：不一样的图另存一份', c.file !== a.file && c.reused === false && fs.readdirSync(dir).length === 2);
+  ok('收图：jpg 头认成 jpg', path.extname(c.file) === '.jpg');
+
+  const d = storeImageBuffer(dir, Buffer.alloc(10, 7), { fallbackExt: '.webp' });
+  ok('收图：嗅不出来就用后缀兜底，且不重复点', path.extname(d.file) === '.webp');
+
+  const msrc4 = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
+  ok('收图：main.mjs 改走内容哈希，不再按 msgId 起名',
+    msrc4.includes('storeImageBuffer(dir, buf') && !msrc4.includes('saveImageUrls(msg.images, msg.msgId'));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ── 历史段：不滑窗，只留保险丝 ──────────────────────────
 // 2026-11-01 查出群聊 433 轮里 87 轮每轮新输入 12–18 万，47% 的钱花在这上面。
 // 根因是 slice(-14)：每来一条新消息整段往前挪一格，缓存按前缀匹配，一挪全断。
@@ -1819,7 +1940,9 @@ check('短消息不切', splitMessage('在吗', 1200), ['在吗']);
   ok('粗估：空串是 0', roughTokens('') === 0);
   const psrc = fs.readFileSync(path.join(ROOT, 'src/body/prompt.mjs'), 'utf8');
   ok('历史段：不再按条数滑窗（没有 older.slice(-14)）', !psrc.includes('older.slice(-14)'));
-  ok('历史段：真挂上了 fitHistory', psrc.includes('renderTranscript(fitHistory(older))'));
+  ok('历史段：真挂上了 fitHistory', psrc.includes('renderTranscript(fitHistory(older)'));
+  // 她得看得到「这句是几点说的」：两小时前和刚说的混在一块儿，模型分不清
+  ok('时间：消息带上时间戳', psrc.includes('withTime: true') && psrc.includes('现在是 '));
   const m500 = fs.readFileSync(path.join(ROOT, 'src/main.mjs'), 'utf8');
   ok('历史段：读的条数放宽到 500（不然短句房间永远涨不满）', m500.includes('readRecent({ room: roomKey, limit: 500 })'));
 }

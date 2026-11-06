@@ -498,7 +498,7 @@ const pair = (m) => (m && String(m.provider || '').trim() && String(m.model || '
       if (area === 'sessions' && req.method === 'GET') {
         return json(res, 200, { ok: true, sessions: sessions.entries() }, origin);
       }
-      if (area === 'sessions' && action === 'reset' && req.method === 'POST') {
+      if (area === 'sessions' && id === 'reset' && req.method === 'POST') {
         const body = await readBody(req);
         const room = body?.room;
         if (!room) return json(res, 400, { error: '要指定房间' }, origin);

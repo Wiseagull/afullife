@@ -6,6 +6,7 @@
 
 import { ROOT } from '../config.mjs';
 import { agoLabel } from '../memory/context.mjs';
+import { similar } from '../memory/upkeep.mjs';
 
 const PERM = {
   look: '这一段你只能看，不能动：可以截图看屏幕、读文件、看进程、上网翻东西；不要点鼠标键盘，不要改任何文件，不要装东西。',
@@ -14,6 +15,11 @@ const PERM = {
 };
 
 const PROTOCOL = [
+  '这一段是你自己的时间，不是待命。',
+  '想做什么就去做什么——画画、看视频、翻东西、整理、写点东西，这些你自己一个人就能做完的事。',
+  '**不是照顾先生，也不是替他做事，更不用把他编进场景里**。他这会儿可能根本不在、也没在看屏幕；你做的事不用等他应，也不用等一个回应。',
+  '别把这一段时间花在等上：他不在，这段才真是你的。',
+  '也不是非得开口。整整一小时一句话没说出来，那也是一小时好好过了。',
   '这一拍你想做什么就做，做完再决定说不说话。',
   '不想说话、也不想动，就只回 <pass/>。',
   '想再等一会儿（比如等他离开电脑）就只回 <wait:秒>。',
@@ -188,14 +194,20 @@ export class FreeTime {
   #longBeats = 0;      // 撞到一拍上限、但还在干活的次数（不算故障，见 #tick）
   #openTries = 0;
   #last = '';
+  // 上一拍她真说出去的那句。自由活动里她容易把同一件事再说一遍——
+  // 正常回话那条链靠 lastOutTs 停表，但那条判据故意滤掉 e.free（不然她每拍
+  // 都在刷新时钟、自由时间永远开不起来），所以同一段里没人拦她。
+  #lastSaid = '';
   #sid = null;
   #recent = null;
   #roomState = null;
   #room;
   #onUsage;
+  #origin = '';
   #reason = '';
   #interests = null;
   #drafts = null;      // 攒着的「也许想记下来的」
+  #getBodyLine = null; // 身体状态那一行（破甲装着时由 main 提供，没装就空着）
   #draft = null;       // 被咽回去的那句，下一拍还给她（不是丢掉）
   #swallowed = 0;      // 这一段咽回去过几次（太多说明拍太长）
   #swallowWhy = '';    // 最近一次为什么咽
@@ -211,7 +223,7 @@ export class FreeTime {
   #epoch = 0;            // 每开一段/收一段 +1；拍子用它认自己是不是上一段的遗孤
   #beatAbort = null;     // 这一拍底下那轮 headless 的叫停开关（段收了就掐）
 
-  constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts, onUsage, onBusy }) {
+  constructor({ cfg, brain, send, logger, queue, room, recent, roomState, interests, drafts, onUsage, onBusy, getBodyLine }) {
     this.#cfg = cfg;
     this.#brain = brain;
     this.#send = send;
@@ -227,6 +239,7 @@ export class FreeTime {
     this.#interests = interests || null;
     // 草稿箱：这段快结束时递给她，看她想不想写进自己那份
     this.#drafts = drafts || null;
+    this.#getBodyLine = getBodyLine || null;
     // 她自己声明「在忙什么」时往外递（(任务, 分钟) 或 (null) 表示忙完）
     this.#onBusy = onBusy || null;
   }
@@ -246,6 +259,7 @@ export class FreeTime {
       messages: this.#messages,
       maxMessages: Number(f.maxMessages ?? 3),
       permission: f.permission || 'look',
+      origin: this.#origin,
       reason: this.#reason,
       paused: this.#paused,
       pausedMs: this.#pausedTotal + (this.#paused ? Date.now() - this.#pausedAt : 0),
@@ -258,11 +272,12 @@ export class FreeTime {
   }
 
   /** 开一段。minutes 不传就用配置里的时长。 */
-  start({ minutes } = {}) {
+  start({ minutes, origin = '' } = {}) {
     const f = this.#cfg.freeTime || {};
     if (this.#running) return { ok: false, error: '已经在自由活动了', status: this.status() };
     const dur = Number(minutes) > 0 ? Number(minutes) * 60000 : Number(f.durationMs ?? 1800000);
     this.#running = true;
+    this.#origin = String(origin || '');
     this.#epoch += 1;
     this.#beating = false;
     this.#startedAt = Date.now();
@@ -569,6 +584,7 @@ export class FreeTime {
         : null,
       quota > 0 ? `这段时间你还能主动说 ${quota} 句话。` : '这一段时间的话已经说完了，剩下的时间只能自己待着，不能再发消息。',
       this.#last ? `你上一拍：${this.#last}` : null,
+      (() => { try { return this.#getBodyLine ? (this.#getBodyLine() || null) : null; } catch { return null; } })(),
       talk
         ? `【这个房间刚才的对话】\n${talk}\n（每句前面是多久之前——老的那些别当成刚发生的。这些都已经说过一遍了：他问的事你要是已经答过，就别再答一遍，接着往下说，或者干脆安静待着。）`
         : null,
@@ -576,7 +592,7 @@ export class FreeTime {
       '',
       opening
         ? (quiet ? '想做点什么就做，不想做就安静待着。' : '想做点什么就做，不想做也可以。先把那句话说完。')
-        : '你可以做点自己想做的事：看看他在干什么、翻翻文件、上网看点东西、或者什么都没必要做。',
+        : '你可以做点自己想做的事——那些不用他配合、你自己一个人就能做完的事：画画、看视频、翻文件、整理点什么、写点东西；也可以什么都不做。',
       opening ? null : '别为了动而动。真没什么想干的，就安安静静待着一拍。',
       opening ? null : interestLines,
       opening ? null : `做完一件就记一笔：\`node scripts/interests.mjs did "名字" "这一回的感觉"\`（在 ${ROOT} 下跑）。想添新的：\`node scripts/interests.mjs add "名字" --why="为什么想"\`。`,
@@ -642,6 +658,19 @@ export class FreeTime {
     }
 
     this.#log('free', `第 ${this.#beats} 拍 ${Date.now() - t0}ms：${text.slice(0, 60).replace(/\s+/g, ' ')}`);
+
+    // 这一拍和上一拍几乎说的是同一件事：别再说第二遍。
+    //
+    // 2026-11-05 18:00:16 她说了「那张粉笔鲸鱼我又放大看了一遍——墙皮裂的、墙根那排草…」，
+    // 18:01:39 下一拍又把同一段几乎一字不差说了一遍（只改了「我放大又看了一遍」的语序）。
+    // 正常回话有 lastOutTs 停表挡着，自由活动这条链故意滤掉了 e.free（否则整段开不起来），
+    // 所以她自己的话对它不可见——得在同一段里单独拦一道。
+    if (this.#lastSaid && similar(text, this.#lastSaid) >= 0.7) {
+      this.#log('free', `这一拍和上一拍几乎一样，不重复说：${text.slice(0, 30).replace(/\s+/g, ' ')}`);
+      this.#last = '你上一拍已经说过这件事了，这一拍别再重复——换个角度，或者安静待着。';
+      this.#schedule(this.#beatMs());
+      return;
+    }
 
     // 这一拍想得久，他中途已经开口了：这句话是按开口前的状态想的，不当场发。
     //
@@ -825,6 +854,8 @@ export class FreeTime {
       // 所以在这儿再问一次 guard —— 该咽就咽，别把按旧状态想的话发出去。
       if (guard && !guard()) return { yielded: true };
       await this.#send(text, opts);
+      // 真发出去了才记——被 guard 咽回去的话下一次还能用，不算「说过」。
+      this.#lastSaid = String(text || '');
       return { aborted: !!opts.aborted };
     };
     // 发出去这一下才排队：保证"一个我一次只说一句"。

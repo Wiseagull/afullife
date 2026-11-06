@@ -1,7 +1,7 @@
 # 命令行小工具
 
 `scripts/` 里全是 `node scripts/xxx.mjs` 直接跑的小工具，没有安装步骤，也没有第三方依赖。
-共 31 个，按"什么时候会用到"分三类。要看某一个的具体参数，就跑 `node scripts/xxx.mjs --help`
+共 33 个，按"什么时候会用到"分三类。要看某一个的具体参数，就跑 `node scripts/xxx.mjs --help`
 或者不带参数跑一次——它们都会先印用法。
 
 ---
@@ -46,6 +46,8 @@
 | `node scripts/web.mjs <url> [--max=20000] [--from=词] [--grep=词]` | 抓网页/接口，吐成能读的文字。`web_fetch` 在本机一律报"非公网 IP"（Clash 的 fake-ip 落在保留段），这条走 Node 的 fetch，不受影响 |
 | `node scripts/send-image.mjs <图片路径> [--to=号] [--group=群号]` | 绕过桥直连 OneBot 发一张图，救急用（桥还是旧进程、自由活动那条路发不出图时就靠它）。不过审计、不记表情库 |
 | `node scripts/art-index.mjs [输出路径]` | 给 `data/art` 里那些图生成一份 `索引.md`（按目录列文件名、尺寸、大小）。只读文件，不改图 |
+| `node scripts/image-dedupe.mjs [--apply]` | 收图去重：按内容哈希分组，一组只留最早那张，其余挪进 `data/images/archive-dupes`（只挪不删）。默认只报告，`--apply` 才动手。幂等，可反复跑 |
+| `node scripts/keep.mjs list\|add\|rm <目录> [文件名...]` | 登记「清理时别动」的文件（目录里的 `keep.json`）。`add` 先确认文件真在目录里，名字拼错就不写；`list` 顺带报没登记、照常按账龄清的有几个。只登记，不删不改文件 |
 
 ## 三、自检与开发（改代码之后跑）
 
@@ -54,7 +56,7 @@
 | 命令 | 检查什么 |
 | --- | --- |
 | `node scripts/doctor.mjs` | 一次看完"装好了没、还活着没、数据有没有坏"：Node 版本、人格三份、桥与 SnowLuma 在不在、表情库账实、事件流大小、小本本用量，分正常/提示/警告/错误四档，有错误时退出码 1。`--json` 给机器读，`--no-net` 不连本机端口 |
-| `node scripts/selftest.mjs` | 460 项：房间与路由、分条、记忆装配、看图白名单、发图标记、自由活动抠图、交接纸条、兴趣账本、探针与看门人、门牌、切格切不开时报的数、历史段的 token 保险丝。全绿之后会自己再问一句"这份生效了没"——桥比 `src/` 旧就就地印一行「这份还没生效」，不算失败项、不改退出码 |
+| `node scripts/selftest.mjs` | 488 项：房间与路由、分条、记忆装配、看图白名单、发图标记、自由活动抠图、交接纸条、兴趣账本、收图去重、探针与看门人、媒体清理的 dry/keep/闸、门牌、切格切不开时报的数、历史段的 token 保险丝。全绿之后会自己再问一句"这份生效了没"——桥比 `src/` 旧就就地印一行「这份还没生效」，不算失败项、不改退出码 |
 | `node scripts/probe-gate.mjs` | 闸的用例表（什么放行、什么要先问） |
 | `node scripts/probe-social.mjs` | 群聊社交状态机与"听着/开口"的判定 |
 | `node scripts/probe-conflict.mjs` | "先问后改"：新说法和旧记忆打架时她会不会来问你 |

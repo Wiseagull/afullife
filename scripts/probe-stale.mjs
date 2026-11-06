@@ -15,6 +15,11 @@
 // 退出码：0 = 没有比桥更新的文件；1 = 有（跑的是旧代码）；2 = 判不了（日志里没有启动记录、或者 pid 已不在）。
 // 判不了的时候不返回 0——"没查成"和"查过没事"不能长得一样。
 //
+// 日志本身也可能整段丢（2026-11-02 19:51 那次：重启脚本的 stdout 没接上，桥活得好好的，
+// 日志却停在上一代、一条「桥已启动」都没有）。所以默认日志判不出的时候，改看桥自己写的
+// data/bridge.pid（进程锁）和 data/bridge.heartbeat（每几十秒一下的心跳）：两个都对得上，
+// 才认这是现在跑着的那只。--log= 指定别处时不兜底——那是在问别处的事。
+//
 // 自检（selftest）全绿之后会自动调一次；桥真的比 src/ 旧、而且那个进程还活着，
 // 就在最后多印一句「这份还没生效」。不算失败项，也不改退出码。
 
@@ -28,6 +33,10 @@ export { TOLERANCE_MS, walkFiles, staleFrom };
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const DEFAULT_LOG = path.join(ROOT, 'data', 'logs', 'dsh-supervisor.log');
+const PID_FILE = path.join(ROOT, 'data', 'bridge.pid');
+const HEARTBEAT_FILE = path.join(ROOT, 'data', 'bridge.heartbeat');
+// 桥的心跳是几十秒一下；十分钟没动就不再认它——那可能是卡死的僵尸，别拿它当"现在这份"。
+const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
 // 两个目录：src/ 是桥自己的代码，plugin/ 是宿主侧（面板要刷页面，其余要重启 DSH）。
 const DIRS = [path.join(ROOT, 'src'), path.join(ROOT, 'plugin')];
 
@@ -64,6 +73,21 @@ function alive(pid) {
   }
 }
 
+// 日志里没有可信的启动记录时，改看桥自己写的那两样。
+// pid 文件是它启动时写的进程锁，mtime 就是启动时刻；心跳是它每几十秒碰一下，
+// 两个都对得上才认——心跳停了就说明它可能卡住了，这时候说"这是现在跑的"是替它打包票。
+export function startFromFiles(pidFile, heartbeatFile, now = Date.now()) {
+  try {
+    const pid = Number(String(fs.readFileSync(pidFile, 'utf8')).trim());
+    if (!pid || !alive(pid)) return null;
+    const beat = fs.statSync(heartbeatFile).mtimeMs;
+    if (now - beat > HEARTBEAT_FRESH_MS) return null;
+    return { at: fs.statSync(pidFile).mtimeMs, pid };
+  } catch {
+    return null;
+  }
+}
+
 // 判一次，返回结构化的结果；main() 只负责把它印出来。
 // selftest 也调这个——自检跑完那一刻，正是我最容易说"好了"的那一刻，
 // 让它自己先答一句"这份还没生效"，比多一道人工步骤靠得住。
@@ -71,18 +95,31 @@ function alive(pid) {
 export function assess(logPath = DEFAULT_LOG, sinceArg = null) {
   try {
     let start = null;
+    let source = 'log';
     if (sinceArg) {
       const at = Date.parse(String(sinceArg).replace(' ', 'T'));
       if (Number.isNaN(at)) return { verdict: 'unknown', reason: `--since="${sinceArg}" 我读不成时间，照 "2026-11-01 20:14:50" 这种写法给` };
       start = { at, pid: null };
-    }
-    if (!start) {
-      if (!fs.existsSync(logPath)) {
-        return { verdict: 'unknown', reason: `没有日志：${logPath}。换一份，或者用 --since 手动钉时刻` };
+      source = 'since';
+    } else {
+      const hasLog = fs.existsSync(logPath);
+      if (hasLog) start = findStart(readTail(logPath));
+      // 日志那条记录指的是死进程，就跟没有一样——换桥自己写的那两样来认。
+      // 只在看默认日志时兜底：传了 --log 就是在问别处的事，不该偷偷拿本机的 pid 文件来答。
+      const logUsable = start !== null && (start.pid ? alive(start.pid) : true);
+      if (!logUsable && logPath === DEFAULT_LOG) {
+        const alt = startFromFiles(PID_FILE, HEARTBEAT_FILE);
+        if (alt) {
+          start = alt;
+          source = 'pidfile';
+        }
       }
-      start = findStart(readTail(logPath));
       if (!start) {
-        return { verdict: 'unknown', reason: `日志尾巴里找不到"桥已启动"（${logPath}）。桥可能还没起，或者日志被轮转过——用 --since 手动钉时刻` };
+        const why = hasLog ? `日志尾巴里找不到"桥已启动"（${logPath}）` : `没有日志：${logPath}`;
+        const also = logPath === DEFAULT_LOG
+          ? `；桥自己写的 ${path.basename(PID_FILE)} / ${path.basename(HEARTBEAT_FILE)} 也对不上（pid 不在，或者心跳停了）`
+          : '';
+        return { verdict: 'unknown', reason: `${why}${also}。桥可能还没起，或者日志被轮转过——用 --since 手动钉时刻` };
       }
     }
     const files = DIRS.flatMap((d) => { try { return walkFiles(d); } catch { return []; } });
@@ -91,7 +128,7 @@ export function assess(logPath = DEFAULT_LOG, sinceArg = null) {
     // pid 已经不在：日志里那条启动记录指的是一个死掉的进程，"现在跑着的这份"是谁就不知道了。
     // 这种情况必须单独说，不能混进 fresh 或 stale。
     const verdict = pidAlive === false ? 'unknown' : stale.length ? 'stale' : 'fresh';
-    return { verdict, pid: start.pid, pidAlive, startedAt: start.at, scanned: files.length, stale };
+    return { verdict, pid: start.pid, pidAlive, startedAt: start.at, source, scanned: files.length, stale };
   } catch (e) {
     return { verdict: 'unknown', reason: `探针自己出错了：${e?.message || e}` };
   }
@@ -131,6 +168,7 @@ function main() {
       pid: r.pid,
       pidAlive: r.pidAlive,
       startedAt: new Date(r.startedAt).toISOString(),
+      source: r.source,
       logFile: sinceArg ? null : logPath,
       scanned: r.scanned,
       stale: r.stale.map((x) => ({ file: path.relative(ROOT, x.file), changedAt: new Date(x.mtime).toISOString() })),
@@ -138,6 +176,9 @@ function main() {
   } else {
     const when = new Date(r.startedAt).toLocaleString('zh-CN', { hour12: false });
     console.log(`桥：${r.pid ? `pid ${r.pid}，` : ''}${when} 启动${r.pidAlive === false ? '（这个进程已经不在了）' : r.pidAlive ? '（还活着）' : ''}`);
+    if (r.source === 'pidfile') {
+      console.log('  （日志里没有可信的启动记录，启动时刻取自 data/bridge.pid；心跳还新，才敢认这只）');
+    }
     console.log(`看的是 src/ + plugin/ 下 ${r.scanned} 个 .mjs/.js`);
     if (r.verdict === 'unknown') {
       console.log('  ? 判不了：日志里那个 pid 不在了，现在跑的是哪一份说不准');

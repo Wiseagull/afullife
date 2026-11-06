@@ -125,3 +125,29 @@ export function oneLine(text, max = 120) {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
+
+// 思考泄漏：模型偶尔把权衡过程当正文吐出来（2026-11-02 22:14 那次，
+// 一整段「我不加那个标记」「wait, I wrote it in draft thought」）。
+// 判据只要「整行基本是英文、且不是一句短话」——她的设定是中文，整行英文基本都是漏出来的。
+const THINK_START = /^(final|wait|actually|careful|let me|i (should|will|need|wrote)|so |okay,|hmm,)\b/i;
+const HAS_CJK = /[\u4e00-\u9fff]/;
+
+export function stripThinkingLeak(text) {
+  const src = String(text || '');
+  if (!src) return '';
+  const keep = src.split('\n').filter((line) => {
+    const t = line.trim();
+    if (!t) return true;                       // 空行留着，末尾统一压
+    // 露了馅的关键词，不管有没有中文都剥（那种中英混着的）
+    // 行尾带结算标记的行不能剥——她常常接在话后面写，不是单独一行
+    // 发图/引用标记里是纯英文的盘符路径，别当思考泄漏剥掉
+    // （2026-11-05 01:23 一回：[[img:E:\...\x.jpg]] 字母占比过七成被删，图静默没发出去）
+    if (/^\[\[(?:img|reply)[:\]]/i.test(t)) return true;
+    if (HAS_CJK.test(t)) return true;          // 有中文就不动它
+    const letters = (t.match(/[A-Za-z]/g) || []).length;
+    if (letters < 12) return true;             // 太短的不像思考（OK / hmm）
+    if (THINK_START.test(t)) return false;     // Final: / Wait: / Actually… 开头
+    return !(letters / t.length > 0.7);        // 七成以上是英文字母 → 当泄漏剥掉
+  });
+  return keep.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}

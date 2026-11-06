@@ -38,7 +38,7 @@ export function parseOps(raw) {
 const DUP_THRESHOLD = 0.8;
 
 /** 两条说法字面上有多像（0~1）。只去标点数字、取二元组交集，纯函数，不花 token。 */
-function similar(a, b) {
+export function similar(a, b) {
   const norm = (s) => String(s || '').replace(/[\s\p{P}\p{S}\d]/gu, '');
   const A = norm(a);
   const B = norm(b);

@@ -249,7 +249,7 @@ export function fitHistory(items, { maxTokens = HISTORY_MAX_TOKENS, estimator = 
   return list.slice(cut);
 }
 
-export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null, usageLine = '', voice = '', state = '' }) {
+export function buildPrompt({ roomKey, messages, recent = [], background = '', extra = '', isGroup = false, selfNames = [], stickerLine = '', personaNote = '', rules = null, usageLine = '', voice = '', state = '', now = Date.now() }) {
   const lines = [];
 
   lines.push(`【房间】${roomKey}`);
@@ -281,7 +281,7 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
   const older = recent.slice(0, Math.max(0, recent.length - messages.length));
   if (older.length) {
     lines.push('【刚才在这儿的对话】');
-    lines.push(renderTranscript(fitHistory(older)));
+    lines.push(renderTranscript(fitHistory(older), { withTime: true }));
     // 上面这些是已经回过话的。不写这一句，新一轮会把里面那句再答一遍：
     // 2026-10-28 01:03 他说「想和你一起睡」，01:03:47 答过一次；01:03:35 那张图另起
     // 一轮时，prompt 里还带着那句话，于是 01:04:26 又答了一遍同一个点。
@@ -289,9 +289,19 @@ export function buildPrompt({ roomKey, messages, recent = [], background = '', e
     lines.push('');
   }
 
+  // 她此刻是几点。不加这一行，她只能从对话内容推时间——2026-11-05 早上八点半
+  // 那个 ComfyUI 任务卡了三个多小时，她全程不知道过了多久，还在按「早上」说话。
+  {
+    const d = new Date(Number(now) || Date.now());
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    lines.push(`现在是 ${hh}:${mm}。`);
+    lines.push('');
+  }
+
   lines.push('【现在要回的消息】');
   if (isGroup) lines.push(buildTriggerLines(messages, { selfNames }).join('\n'));
-  else lines.push(renderTranscript(messages));
+  else lines.push(renderTranscript(messages, { withTime: true }));
   lines.push('');
   if (stickerLine) {
     lines.push(stickerLine);
@@ -332,7 +342,7 @@ export function buildFollowup(messages, { delta = '', isGroup = false, addressed
   const head = (usage ? usage + '\n\n' : '') + (delta ? `${delta}\n\n${KNOW_HINT}\n\n` : '');
   const body = isGroup
     ? buildTriggerLines(messages, { selfNames }).join('\n')
-    : renderTranscript(messages);
+    : renderTranscript(messages, { withTime: true });
   const tail = stickerLine ? `\n\n${stickerLine}` : '';
   const voiceBlockPart = voice ? `${BLANK}${voice}` : '';
   const stateBlockPart = state ? `${BLANK}${state}` : '';

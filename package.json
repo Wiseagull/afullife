@@ -21,7 +21,8 @@
     "lint": "eslint .",
     "probe:conflict": "node scripts/probe-conflict.mjs",
     "probe:panel": "node scripts/probe-panel-note.mjs",
-    "probe:stale": "node scripts/probe-stale.mjs"
+    "probe:stale": "node scripts/probe-stale.mjs",
+    "dedupe:images": "node scripts/image-dedupe.mjs"
   },
   "license": "MIT",
   "keywords": [

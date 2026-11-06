@@ -51,6 +51,22 @@ export function roomView(cfg, room) {
   return { read, share };
 }
 
+/** 群聊里最多给几条记忆（私聊默认 12）。 */
+const GROUP_LIMIT_NOTES = 6;
+
+/** 排序时「这个房间自己的」加多少权重。原来是 1，压不过全局记忆的 weight 3。 */
+const SAME_ROOM_BONUS = 3;
+
+/**
+ * 这条记忆是不是技术性的。群里不注入——那不是群友听得懂的事，
+ * 也不是她该在群里提的事（2026-11-06 那次 LoRA 串群）。
+ */
+const TECH_RE = /LoRA|工作流|节点|提示词|模型|参数|脚本|报错|ComfyUI|采样|步数|seed|SD\b/i;
+
+export function isTechNote(n) {
+  return String(n?.kind || '') === '事实' && TECH_RE.test(String(n?.text || ''));
+}
+
 /** 一条事件值不值得记进“隐约记得”：图/表情只提一句，空的丢掉 */
 function worthwhile(e) {
   if (!e) return false;
@@ -113,18 +129,29 @@ export function buildBackground({
   }
 
   // ② 已经沉淀下来的记忆——这些才是定论，带出处
+  //
+  // 2026-11-06 21:21 那次事故：群里在聊 MP7，她突然插一句「记忆里有两处打架
+  // 画图到底走不走 LoRA」，还叫了「先生」。查下来不是发错窗口，是记忆串域——
+  // 926 条里有 641 条没有房间标签（room:null，全局可见），技术记忆权重 2~3，
+  // 一按权重排就挤进前 12，于是群里也读到了只跟主人有关的那些。
+  // 两道闸：群聊里滤掉技术性的，条数砍半。
+  const inGroup = String(roomKey || '').startsWith('group:');
+  const limitNotesNow = inGroup ? Math.min(limitNotes, GROUP_LIMIT_NOTES) : limitNotes;
+
   const keep = notes
     .filter((n) => !n.staleAt)
-    .filter((n) => !n.room || !roomKey || canSee(cfg, roomKey, n.room));
+    .filter((n) => !n.room || !roomKey || canSee(cfg, roomKey, n.room))
+    .filter((n) => !(inGroup && isTechNote(n)));
   if (keep.length) {
     const sorted = [...keep].sort((a, b) => {
-      const ra = (a.room === roomKey ? 1 : 0) + (a.weight || 0);
-      const rb = (b.room === roomKey ? 1 : 0) + (b.weight || 0);
+      // 这个房间自己的排前面（原来只 +1，压不过全局记忆的 weight 3）
+      const ra = (a.room === roomKey ? SAME_ROOM_BONUS : 0) + (a.weight || 0);
+      const rb = (b.room === roomKey ? SAME_ROOM_BONUS : 0) + (b.weight || 0);
       return rb - ra;
     });
     if (blocks.length) blocks.push('');
     blocks.push('（你记得的事）');
-    for (const n of sorted.slice(0, limitNotes)) {
+    for (const n of sorted.slice(0, limitNotesNow)) {
       const from = n.room && n.room !== roomKey ? `，来自${roomTag(n.room, nameOf)}` : '';
       blocks.push(`- 「${n.kind}」${n.text}${from}${refTag(n)}`);
     }

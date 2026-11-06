@@ -90,8 +90,17 @@ export function normalizeEvent(raw, { selfId = '', selfNames = [] } = {}) {
 }
 
 /** 把一串事件渲染成给脑子看的对话记录（纯文本）。 */
-export function renderTranscript(events) {
+export function renderTranscript(events, { withTime = false } = {}) {
   return events.map((e) => {
+    // 她自己在几点说的这句话。带上时间她才知道「这句是两小时前的、那句是刚说的」——
+    // 2026-11-05 那次 ComfyUI 卡了三小时，她按「早上」说话，因为 prompt 里没有时间。
+    let stamp = '';
+    if (withTime && e.ts) {
+      const d = new Date(Number(e.ts));
+      if (!Number.isNaN(d.getTime())) {
+        stamp = `[${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}] `;
+      }
+    }
     // 她自己说出去的（dir:'out'）事件没带 name —— 以前这里落到 '?'，
     // 于是她回看【刚才在这儿的对话】时，自己的话全是一行行「?: ……」，
     // 认不出哪句是自己说的（2026-10-28 01:05 她把一句垫话当成了别人替她说的）。
@@ -109,7 +118,7 @@ export function renderTranscript(events) {
     // 一是省 token，二是别让她照着“上一次的长回复”继续往下说（人设就是这么漂走的）
     if (e.dir === 'out' && text.length > 80) text = `${text.slice(0, 80)}……（后面还说了一些）`;
     if (quote) text = text.replace(/\[引用\]/g, '');
-    if (!files.length && !vids.length) return `${num}${who}: ${quote}${text.trim()}`;
+    if (!files.length && !vids.length) return `${stamp}${num}${who}: ${quote}${text.trim()}`;
     // 正文里原本只有 [图片] / [视频] 占位，换成真实路径——图她当场能 read_image，
     // 视频只能给她文件，怎么看得她自己拿 ffmpeg 抽帧（那是她的活，不是桥的）
     text = text.replace(/(\[图片\])+/g, '').replace(/(\[视频\])+/g, '').trim();
@@ -117,7 +126,7 @@ export function renderTranscript(events) {
       ...files.map((f, i) => `图片${i + 1}：${f}`),
       ...vids.map((f, i) => `视频${i + 1}：${f}`),
     ].join('；');
-    return `${num}${who}: ${quote}${text}${text ? ' ' : ''}（${list}）`;
+    return `${stamp}${num}${who}: ${quote}${text}${text ? ' ' : ''}（${list}）`;
   }).join('\n');
 }
 

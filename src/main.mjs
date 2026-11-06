@@ -48,6 +48,7 @@ import { createStaleWatch } from './util/stale-watch.mjs';
 import { startWeb } from './web/server.mjs';
 import { cleanupImages, VIDEO_RE } from './media/cleanup.mjs';
 import { sniffImage, sniffVideo } from './media/sniff.mjs';
+import { storeImageBuffer } from './media/store.mjs';
 import { gifFrameCount, gifToMp4 } from './media/gif.mjs';
 import { StickerLibrary } from './stickers/library.mjs';
 import { isYes, isNo } from './util/yesno.mjs';
@@ -177,6 +178,7 @@ async function sendImageNow(file, { kind, targetId }) {
 }
 
 async function freeSay(text, opts = {}) {
+  if (!String(text || '').trim() && !(opts && opts.keepEmpty)) return;
   const room = freeRoomKey();
   const qq = String(room).replace(/^private:/, '').replace(/^group:/, '');
   const isGroup = String(room).startsWith('group:');
@@ -587,23 +589,25 @@ function selfNames() {
   return [client.selfName, ...(cfg.group?.names || [])].filter(Boolean);
 }
 
-/** 把一组图地址存到本地 —— 存不下的就跳过，不能因为一张图把消息丢了。 */
-async function saveImageUrls(urls, tag) {
+/**
+ * 把一组图地址存到本地 —— 存不下的就跳过，不能因为一张图把消息丢了。
+ *
+ * 名字按内容算，不按 msgId：同一张图被反复发来只留一份、只把 mtime 拨新。
+ * 原因见 src/media/store.mjs —— 用 msgId 命名时，一张表情在 4 天里存了 46 遍，
+ * 又把不重复的图从按 mtime 的清理里挤了出去。
+ */
+async function saveImageUrls(urls) {
   const dir = path.join(cfg.dataDir, 'images');
-  fs.mkdirSync(dir, { recursive: true });
-  // 名字里的 tag 有时是从消息段直接来的（被引用的 id），别让它带出路径分隔符
-  const safeTag = String(tag ?? '').replace(/[^\w.-]/g, '_').slice(0, 60) || String(Date.now());
   const files = [];
-  for (const [i, url] of urls.entries()) {
+  for (const url of urls) {
     try {
       const res = await fetch(url);
       if (!res.ok) continue;
       const buf = Buffer.from(await res.arrayBuffer());
       // 按文件头定扩展名：QQ 给的地址后缀经常是假的（.png 里装 jpg），
-      // 名字错了 read_image 会直接拒读，所以宁可自己嗅一遍。
-      const ext = sniffImage(buf) || (url.match(/\.(png|jpe?g|gif|webp)/i)?.[1] || 'png').toLowerCase();
-      const file = path.join(dir, `${safeTag}-${i}.${ext}`);
-      fs.writeFileSync(file, buf);
+      // 名字错了 read_image 会直接拒读，所以宁可自己嗅一遍（storeImageBuffer 里做的）。
+      const fallbackExt = url.match(/\.(png|jpe?g|gif|webp)/i)?.[1];
+      const { file } = storeImageBuffer(dir, buf, { fallbackExt });
       files.push(file);
     } catch { /* ignore */ }
   }
@@ -611,7 +615,7 @@ async function saveImageUrls(urls, tag) {
 }
 
 async function saveImages(msg) {
-  return saveImageUrls(msg.images, msg.msgId || Date.now());
+  return saveImageUrls(msg.images);
 }
 
 /**
@@ -848,7 +852,7 @@ client.on('event', async (raw) => {
           ? segs.filter((s) => s?.type === 'image')
             .map((s) => String(s?.data?.url || s?.data?.file || '')).filter(Boolean)
           : [];
-        const files = urls.length ? await saveImageUrls(urls, `quoted-${msg.replyId}`) : [];
+        const files = urls.length ? await saveImageUrls(urls) : [];
         const text = withFiles(raw, files);
         if (String(text).trim()) {
           msg.quoteText = String(text).trim();
@@ -1323,7 +1327,7 @@ async function handleBatch(roomKey, msgs) {
 /** 一轮的话说出去、记下来。 */
 async function finishTurn(roomKey, last, result, conflicts = [], msgs = []) {
   if (result?.sessionId) sessions.set(roomKey, result.sessionId);
-  const text = String(result?.text ?? '').trim();
+  let text = String(result?.text ?? '').trim();
   if (!text) {
     L('brain', '空回复，跳过');
     return;
